@@ -52,14 +52,26 @@ a healthcare/EPJ context where GDPR/Personvern applies.
 
 Masked data types:
 
-- **Norwegian national identity numbers** — fødselsnummer and D-numbers,
-  validated with date and MOD11 checks (matched in both string and numeric
-  fields)
-- **Person names**
+- **Norwegian national identity numbers** — fødselsnummer, D-numbers,
+  H-numbers and FH-numbers, validated with date and MOD11 checks (matched in
+  both string and numeric fields; numeric values that lost a leading zero are
+  padded and re-checked)
+- **Person names** — best-effort (see limitations below)
 - **Email addresses** (reserved example/test domains such as `example.com`
   are intentionally treated as non-PII)
 - **Phone numbers** — Norwegian formats including `+47`/`0047`, space-grouped
   numbers and bare mobile numbers (prefix 4 or 9)
+
+### Limitations
+
+- **Names are best-effort.** Detection relies on the library's NER and is not
+  guaranteed: uncommon names and some hyphenated names may be only partially
+  masked. Fødselsnummer (the strongest identifier) is masked reliably; do not
+  rely on name masking alone as your only safeguard for free-text fields.
+- **Phone over-redaction.** Bare 8-digit numbers starting with 4 or 9 are
+  treated as mobile numbers, so an unrelated 8-digit value in a string (e.g.
+  an order id) starting with those digits may be masked as a phone number.
+  This is a deliberate privacy-first trade-off.
 
 Redaction is built on the [`openredaction`](https://www.npmjs.com/package/openredaction)
 library and runs **entirely in-process** — no audit backend, metrics exporter,

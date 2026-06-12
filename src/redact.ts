@@ -33,15 +33,21 @@ function isRedactionEnabled(): boolean {
 }
 
 /**
- * Validate a candidate Norwegian fødselsnummer / D-number.
+ * Validate a candidate Norwegian national identity number.
  *
- * Checks the embedded date part (accepting D-numbers, where 40 is added to
- * the day) and both MOD11 control digits. This keeps false positives near
- * zero so unrelated 11-digit values (timestamps, IDs) are left intact.
+ * Accepts the identifier variants used in Norwegian healthcare:
+ *  - fødselsnummer (ordinary 11-digit birth number)
+ *  - D-number (temporary number; 40 added to the day → day 41–71)
+ *  - H-number (help number; 40 added to the month → month 41–52)
+ *  - FH-number (felles hjelpenummer; first digit 8 or 9, no date semantics)
+ *
+ * Validation checks the embedded date part where applicable and both MOD11
+ * control digits, keeping false positives near zero so unrelated 11-digit
+ * values (timestamps, IDs) are left intact.
  *
  * @param match - The matched string, optionally containing a single space
  *                after the 6-digit date part
- * @returns true if the value is a structurally valid fødselsnummer/D-number
+ * @returns true if the value is a structurally valid Norwegian identity number
  */
 function isValidNorwegianFnr(match: string): boolean {
   const digits = match.replace(/\s/g, '');
@@ -49,11 +55,17 @@ function isValidNorwegianFnr(match: string): boolean {
 
   const d = digits.split('').map(Number);
 
-  // Day part allows D-numbers (day + 40 → 41–71).
-  let day = d[0] * 10 + d[1];
-  if (day > 40) day -= 40;
-  const month = d[2] * 10 + d[3];
-  if (day < 1 || day > 31 || month < 1 || month > 12) return false;
+  // FH-numbers start with 8 or 9 and carry no date meaning — they are
+  // validated by the MOD11 control digits alone. Other numbers have a date
+  // part, allowing the D-number day offset (+40) and H-number month offset
+  // (+40).
+  if (d[0] < 8) {
+    let day = d[0] * 10 + d[1];
+    if (day > 40) day -= 40;
+    let month = d[2] * 10 + d[3];
+    if (month > 40) month -= 40;
+    if (day < 1 || day > 31 || month < 1 || month > 12) return false;
+  }
 
   // MOD11 control digit 1 (position 10).
   const w1 = [3, 7, 6, 1, 8, 9, 4, 5, 2];
@@ -105,6 +117,14 @@ const NORWEGIAN_FNR_PATTERN: PIIPattern = {
  * useful. The validator confirms exactly 8 subscriber digits (optionally
  * preceded by the "47" country code) so a fragment of a longer number is
  * never redacted.
+ *
+ * Trade-off: the bare-mobile branch (`\b[49]\d{7}\b`) will also match an
+ * unrelated 8-digit value embedded in a string that happens to start with 4
+ * or 9 (e.g. an order id `90000001`). This is a deliberate privacy-first
+ * choice — leaking a real phone number is worse than masking an identifier
+ * in a debug log. Set SEQ_REDACTION_ENABLED=false, or drop this branch, if
+ * that over-redaction is unacceptable for a given deployment. (8-digit JSON
+ * *numbers* are unaffected: redactDeep only scans 10/11-digit integers.)
  */
 const NORWEGIAN_PHONE_PATTERN: PIIPattern = {
   type: 'PHONE_NO',
@@ -183,11 +203,18 @@ export async function redactDeep<T>(value: T): Promise<T> {
     return out as unknown as T;
   }
 
-  // A fødselsnummer may arrive as a numeric value; scan 11-digit integers.
-  if (typeof value === 'number' && Number.isInteger(value) && String(Math.abs(value)).length === 11) {
-    const asString = String(value);
-    const redacted = await redactText(asString);
-    return (redacted === asString ? value : redacted) as unknown as T;
+  // A fødselsnummer may arrive as a numeric value. Stored as a number it
+  // loses leading zeros, so a person born on days 01–09 yields 10 digits;
+  // pad such values back to 11 before checking. (Numbers are inherently lossy
+  // for identity numbers — prefer logging them as strings.)
+  if (typeof value === 'number' && Number.isInteger(value)) {
+    const raw = String(Math.abs(value));
+    const candidate = raw.length === 11 ? raw : raw.length === 10 ? `0${raw}` : null;
+    if (candidate) {
+      const redacted = await redactText(candidate);
+      if (redacted !== candidate) return redacted as unknown as T;
+    }
+    return value;
   }
 
   return value;

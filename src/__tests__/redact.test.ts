@@ -1,9 +1,12 @@
 import { redactText, redactDeep } from '../redact.js';
 
-// A structurally valid (synthetic) Norwegian fødselsnummer with correct
-// MOD11 control digits, used to verify detection without using a real person's
-// number.
+// Structurally valid (synthetic) Norwegian identity numbers with correct
+// MOD11 control digits, used to verify detection without using a real
+// person's number.
 const VALID_FNR = '13116900216';
+const LEADING_ZERO_FNR = '05069010042'; // born day 05 → 10 digits as a number
+const H_NUMBER = '13114690281'; // H-number: month 46 → 06
+const FH_NUMBER = '81234567055'; // FH-number: first digit 8, no date
 
 describe('redactText', () => {
   beforeEach(() => {
@@ -27,6 +30,22 @@ describe('redactText', () => {
     const notFnr = '17000000000';
     const out = await redactText(`ts=${notFnr}`);
     expect(out).toContain(notFnr);
+  });
+
+  it('masks H-numbers and FH-numbers (healthcare identifiers)', async () => {
+    const hOut = await redactText(`Hjelpenummer ${H_NUMBER} registrert`);
+    expect(hOut).not.toContain(H_NUMBER);
+    const fhOut = await redactText(`FH-nummer ${FH_NUMBER} registrert`);
+    expect(fhOut).not.toContain(FH_NUMBER);
+  });
+
+  it('masks a Norwegian person name', async () => {
+    // Locks in regression protection for full-name masking via the library's
+    // NER. Note: name detection is best-effort (see README) — this guards the
+    // common case rather than guaranteeing all names.
+    const out = await redactText('Pasient Kari Nordmann ble innlagt');
+    expect(out).not.toContain('Kari Nordmann');
+    expect(out).toContain('NAME');
   });
 
   it('masks email addresses', async () => {
@@ -80,5 +99,14 @@ describe('redactDeep', () => {
   it('masks a fødselsnummer stored as a numeric value', async () => {
     const out = await redactDeep({ NationalId: Number(VALID_FNR) });
     expect(String(out.NationalId)).not.toBe(VALID_FNR);
+  });
+
+  it('masks a numeric fødselsnummer that lost its leading zero', async () => {
+    // Stored as a JS number this is 10 digits; it must still be masked.
+    const numeric = Number(LEADING_ZERO_FNR);
+    expect(String(numeric).length).toBe(10);
+    const out = await redactDeep({ NationalId: numeric });
+    expect(String(out.NationalId)).not.toBe(String(numeric));
+    expect(String(out.NationalId)).toContain('FNR');
   });
 });
