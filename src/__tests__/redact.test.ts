@@ -53,6 +53,20 @@ describe('redactText', () => {
     expect(out).not.toContain('Haugen');
   });
 
+  it('masks ambiguous common-word names only as part of a full name', async () => {
+    // "Per Berg" is a full name → both masked.
+    const fullName = await redactText('Per Berg ringte');
+    expect(fullName).not.toContain('Per');
+    expect(fullName).not.toContain('Berg');
+  });
+
+  it('does not mask standalone common words that happen to be names', async () => {
+    // "Else", "Per", "Tom", "Odd" alone are ordinary log/code words → kept.
+    for (const input of ['Else if request failed', 'Per second the rate was high', 'Tom buffer; Odd behaviour']) {
+      expect(await redactText(input)).toBe(input);
+    }
+  });
+
   // Regression guard for the openredaction semicolon limitation (issue #26):
   // a delimiter in the text must not suppress detection elsewhere.
   it('still masks PII when the text contains semicolons', async () => {

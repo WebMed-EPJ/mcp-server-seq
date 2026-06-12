@@ -66,7 +66,10 @@ Masked data types:
 
 - **Names are best-effort.** Names are matched against a curated dictionary of
   common Norwegian first names and surnames, so names outside that list are not
-  masked (extend the dictionary in `src/redact.ts` as needed). Fødselsnummer
+  masked (extend the dictionary in `src/redact.ts` as needed). Dictionary
+  entries that are also common words/log tokens (e.g. "Else", "Per", "Berg")
+  are only masked when part of a multi-token name (e.g. "Per Berg"), to avoid
+  corrupting logs — so such a name appearing alone is not masked. Fødselsnummer
   (the strongest identifier) is masked reliably; do not rely on name masking
   alone as your only safeguard for free-text fields.
 - **Phone over-redaction.** Bare 8-digit numbers starting with 4 or 9 are

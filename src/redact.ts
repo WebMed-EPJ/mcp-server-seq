@@ -18,7 +18,8 @@ import { OpenRedaction, type PIIPattern } from 'openredaction';
  *    (custom pattern below)
  *  - Person names — only those present in the curated Norwegian name
  *    dictionary below (the library's built-in NER is disabled; names outside
- *    the dictionary are NOT redacted)
+ *    the dictionary are NOT redacted). Names that are also common words are
+ *    only masked when part of a multi-token name (see redactNorwegianNames)
  *  - Email addresses (library built-in; reserved example/test domains such
  *    as example.com are intentionally treated as non-PII)
  */
@@ -145,10 +146,10 @@ const NORWEGIAN_PHONE_PATTERN: PIIPattern = {
 };
 
 /**
- * Dictionary of common Norwegian first names and surnames (lower-cased),
- * used by {@link NORWEGIAN_NAME_PATTERN} to improve name redaction beyond the
- * library's best-effort NER. The list is intentionally a curated common-name
- * set rather than exhaustive — extend it as needed for a given deployment.
+ * Dictionary of common Norwegian first names and surnames (lower-cased), used
+ * by {@link redactNorwegianNames}. The list is intentionally a curated
+ * common-name set rather than exhaustive — extend it as needed for a given
+ * deployment. Names NOT in this set are not redacted.
  */
 const NORWEGIAN_NAMES: ReadonlySet<string> = new Set(
   [
@@ -177,28 +178,105 @@ const NORWEGIAN_NAMES: ReadonlySet<string> = new Set(
 );
 
 /**
- * Custom dictionary-based pattern for Norwegian person names. The library's
- * built-in NER is disabled (see {@link getDetector}) because it produced noisy
- * false positives on Norwegian text, so names are matched solely against the
- * curated {@link NORWEGIAN_NAMES} dictionary: a capitalized word is redacted
- * only when its lower-case form is a known Norwegian first name or surname.
- *
- * IMPORTANT: names NOT in the dictionary are NOT redacted — coverage is
- * best-effort and bounded by the list, which should be extended per
- * deployment. Words are matched individually (not as greedy multi-word spans)
- * so adjacent non-name capitalized words — e.g. a sentence-initial "Pasient" —
- * are not swallowed, and each component of a hyphenated name ("Solberg-Haugen")
- * is matched separately so no part leaks.
+ * Subset of {@link NORWEGIAN_NAMES} whose entries are also high-frequency
+ * ordinary words or technical tokens that routinely appear capitalized in logs
+ * (e.g. "Else" in stack traces, "Per" in "Per request", "Tom" = empty, and
+ * surname/noun collisions like "Berg", "Holm", "Strand"). To avoid corrupting
+ * logs, these are redacted only when they appear as part of a multi-token name
+ * (immediately adjacent to another dictionary name); standalone occurrences are
+ * left intact. Unambiguous names are always redacted (see
+ * {@link redactNorwegianNames}).
  */
-const NORWEGIAN_NAME_PATTERN: PIIPattern = {
-  type: 'NAME_NO',
-  regex: /\b[A-ZÆØÅ][a-zæøåäöéèü]+\b/g,
-  priority: 95,
-  validator: (value: string) => NORWEGIAN_NAMES.has(value.toLowerCase()),
-  placeholder: '[NAME_{n}]',
-  description: 'Norwegian person name (dictionary-based)',
-  severity: 'high',
-};
+const AMBIGUOUS_NAMES: ReadonlySet<string> = new Set([
+  'else', 'per', 'tom', 'odd', 'tor', 'berg', 'strand', 'holm', 'lund', 'lie',
+  'moe', 'vik', 'dahl', 'hagen',
+]);
+
+/** Matches a single capitalized word (Norwegian letters included). */
+const NAME_TOKEN = /[A-ZÆØÅ][a-zæøåäöéèü]+/g;
+
+/**
+ * Deterministic short id for a name token, so the same name maps to the same
+ * placeholder within (and across) responses.
+ *
+ * @param token - The matched name token
+ * @returns A 4-digit string id
+ */
+function nameKey(token: string): string {
+  let hash = 0;
+  const lc = token.toLowerCase();
+  for (let i = 0; i < lc.length; i++) hash = (hash * 31 + lc.charCodeAt(i)) >>> 0;
+  return String(hash % 10000).padStart(4, '0');
+}
+
+/**
+ * Redact Norwegian person names from text using the {@link NORWEGIAN_NAMES}
+ * dictionary. The library's built-in NER is disabled (see {@link getDetector})
+ * because it produced noisy false positives on Norwegian text; this is the sole
+ * name-redaction step.
+ *
+ * Matching rules:
+ *  - A capitalized word whose lower-case form is an unambiguous dictionary name
+ *    is always redacted.
+ *  - An {@link AMBIGUOUS_NAMES} word is redacted only when an immediately
+ *    adjacent token (separated by a single space or hyphen) is also a
+ *    dictionary name — i.e. it is part of a full name like "Per Berg" — so
+ *    standalone common words such as "Else" or "Per second" are not masked.
+ *  - Words are handled individually, so non-name neighbours (e.g. a
+ *    sentence-initial "Pasient") are never swallowed, and each part of a
+ *    hyphenated name ("Solberg-Haugen") is evaluated separately.
+ *
+ * IMPORTANT: names outside the dictionary are NOT redacted — coverage is
+ * best-effort and bounded by the list.
+ *
+ * @param text - The text to scan
+ * @returns The text with recognised names replaced by [NAME_nnnn]
+ */
+function redactNorwegianNames(text: string): string {
+  const tokens: { value: string; start: number; end: number }[] = [];
+  NAME_TOKEN.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = NAME_TOKEN.exec(text)) !== null) {
+    tokens.push({ value: match[0], start: match.index, end: match.index + match[0].length });
+  }
+
+  const isDictName = (value: string): boolean => NORWEGIAN_NAMES.has(value.toLowerCase());
+  // True when `neighbour` is a dictionary name separated from `self` by only a
+  // single space or hyphen (i.e. the two form one name).
+  const adjacent = (
+    self: { start: number; end: number },
+    neighbour: { value: string; start: number; end: number } | undefined,
+    side: 'before' | 'after',
+  ): boolean => {
+    if (!neighbour || !isDictName(neighbour.value)) return false;
+    const gap = side === 'before'
+      ? text.slice(neighbour.end, self.start)
+      : text.slice(self.end, neighbour.start);
+    return /^[ -]$/.test(gap);
+  };
+
+  const toRedact = new Set<number>();
+  for (let i = 0; i < tokens.length; i++) {
+    const lc = tokens[i].value.toLowerCase();
+    if (!isDictName(lc)) continue;
+    if (!AMBIGUOUS_NAMES.has(lc)) {
+      toRedact.add(i);
+    } else if (adjacent(tokens[i], tokens[i - 1], 'before') || adjacent(tokens[i], tokens[i + 1], 'after')) {
+      toRedact.add(i);
+    }
+  }
+
+  if (toRedact.size === 0) return text;
+
+  let out = '';
+  let cursor = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    if (!toRedact.has(i)) continue;
+    out += text.slice(cursor, tokens[i].start) + `[NAME_${nameKey(tokens[i].value)}]`;
+    cursor = tokens[i].end;
+  }
+  return out + text.slice(cursor);
+}
 
 let detector: OpenRedaction | null = null;
 
@@ -214,11 +292,11 @@ function getDetector(): OpenRedaction {
       // built-in detection (NER names, social handles, UK/US phones) produced
       // noisy false positives on Norwegian log text — e.g. mangling ordinary
       // words into [IG_USER_n] and flagging "Gateway" as a name — and its
-      // UK/US phone patterns over-match long digit runs. Names, phone numbers
-      // and identity numbers are handled precisely by the Norwegian-tuned
-      // custom patterns below instead.
+      // UK/US phone patterns over-match long digit runs. Identity and phone
+      // numbers are handled by the Norwegian-tuned custom patterns; person
+      // names are handled separately by redactNorwegianNames.
       patterns: ['EMAIL'],
-      customPatterns: [NORWEGIAN_FNR_PATTERN, NORWEGIAN_PHONE_PATTERN, NORWEGIAN_NAME_PATTERN],
+      customPatterns: [NORWEGIAN_FNR_PATTERN, NORWEGIAN_PHONE_PATTERN],
       redactionMode: 'placeholder',
       // Audit logging, metrics, webhooks and RBAC are intentionally left at
       // their defaults (all off) so redaction stays fully in-process — no
@@ -267,7 +345,11 @@ export async function redactText(text: string): Promise<string> {
     if (index % 2 === 1 || part === '') {
       out.push(part);
     } else {
-      out.push((await detector.detect(part)).redacted);
+      // Library handles email/fnr/phone; names are redacted by our own
+      // dictionary pass afterwards (placeholders contain no segment delimiters,
+      // so the name pass is unaffected by segmentation).
+      const detected = (await detector.detect(part)).redacted;
+      out.push(redactNorwegianNames(detected));
     }
   }
   return out.join('');
