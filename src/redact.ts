@@ -139,6 +139,61 @@ const NORWEGIAN_PHONE_PATTERN: PIIPattern = {
   severity: 'high',
 };
 
+/**
+ * Dictionary of common Norwegian first names and surnames (lower-cased),
+ * used by {@link NORWEGIAN_NAME_PATTERN} to improve name redaction beyond the
+ * library's best-effort NER. The list is intentionally a curated common-name
+ * set rather than exhaustive — extend it as needed for a given deployment.
+ */
+const NORWEGIAN_NAMES: ReadonlySet<string> = new Set(
+  [
+    // Common first names
+    'anne', 'inger', 'kari', 'marit', 'ingrid', 'liv', 'eva', 'berit', 'astrid',
+    'bjørg', 'hilde', 'anna', 'solveig', 'randi', 'gerd', 'nina', 'marianne',
+    'kristin', 'elisabeth', 'ida', 'maria', 'hanne', 'else', 'tone', 'ellen',
+    'wenche', 'turid', 'sissel', 'grete', 'bente', 'heidi', 'camilla', 'silje',
+    'julie', 'emma', 'sofie', 'nora', 'ingeborg', 'linda', 'monica', 'hege',
+    'trine', 'mette', 'jan', 'per', 'bjørn', 'ole', 'ola', 'lars', 'kjell',
+    'knut', 'svein', 'arne', 'hans', 'odd', 'tor', 'geir', 'tom', 'rolf',
+    'morten', 'terje', 'thomas', 'martin', 'andreas', 'anders', 'magnus',
+    'kristian', 'henrik', 'erik', 'espen', 'fredrik', 'jonas', 'marius',
+    'daniel', 'håkon', 'jens', 'nils', 'petter', 'stian', 'trond', 'vidar',
+    'øyvind', 'rune', 'sander', 'mathias', 'jakob', 'emil', 'oliver', 'filip',
+    'noah', 'william', 'olav', 'sigurd', 'gunnar', 'harald', 'leif', 'egil',
+    // Common surnames
+    'hansen', 'johansen', 'olsen', 'larsen', 'andersen', 'pedersen', 'nilsen',
+    'kristiansen', 'jensen', 'karlsen', 'johnsen', 'pettersen', 'eriksen',
+    'berg', 'haugen', 'hagen', 'johannessen', 'andreassen', 'jacobsen', 'dahl',
+    'jørgensen', 'halvorsen', 'lund', 'solberg', 'moen', 'eide', 'strand',
+    'bakken', 'kristoffersen', 'mathisen', 'lie', 'iversen', 'rasmussen',
+    'gundersen', 'holm', 'lunde', 'aas', 'moe', 'vik', 'antonsen', 'ellingsen',
+    'nordmann',
+  ],
+);
+
+/**
+ * Custom dictionary-based pattern for Norwegian person names. The library's
+ * built-in NER misses or only partially masks many Norwegian names (notably
+ * leaking part of a hyphenated surname), so this pattern matches any
+ * capitalized word and redacts it when it is a known Norwegian first name or
+ * surname per {@link NORWEGIAN_NAMES}.
+ *
+ * Words are matched individually (not as greedy multi-word spans) so adjacent
+ * non-name capitalized words — e.g. a sentence-initial "Pasient" — are not
+ * swallowed. Each component of a hyphenated name ("Solberg-Haugen") is matched
+ * separately, so no part leaks. Runs alongside the library NER, which still
+ * provides best-effort coverage for names outside the dictionary.
+ */
+const NORWEGIAN_NAME_PATTERN: PIIPattern = {
+  type: 'NAME_NO',
+  regex: /\b[A-ZÆØÅ][a-zæøåäöéèü]+\b/g,
+  priority: 95,
+  validator: (value: string) => NORWEGIAN_NAMES.has(value.toLowerCase()),
+  placeholder: '[NAME_{n}]',
+  description: 'Norwegian person name (dictionary-based)',
+  severity: 'high',
+};
+
 let detector: OpenRedaction | null = null;
 
 /**
@@ -149,11 +204,15 @@ let detector: OpenRedaction | null = null;
 function getDetector(): OpenRedaction {
   if (!detector) {
     detector = new OpenRedaction({
-      includeNames: true,
-      includeEmails: true,
-      includePhones: false, // UK/US built-ins over-match digit runs; see NORWEGIAN_PHONE_PATTERN
-      includeAddresses: false,
-      customPatterns: [NORWEGIAN_FNR_PATTERN, NORWEGIAN_PHONE_PATTERN],
+      // Whitelist only the built-in EMAIL pattern. The library's broader
+      // built-in detection (NER names, social handles, UK/US phones) produced
+      // noisy false positives on Norwegian log text — e.g. mangling ordinary
+      // words into [IG_USER_n] and flagging "Gateway" as a name — and its
+      // UK/US phone patterns over-match long digit runs. Names, phone numbers
+      // and identity numbers are handled precisely by the Norwegian-tuned
+      // custom patterns below instead.
+      patterns: ['EMAIL'],
+      customPatterns: [NORWEGIAN_FNR_PATTERN, NORWEGIAN_PHONE_PATTERN, NORWEGIAN_NAME_PATTERN],
       redactionMode: 'placeholder',
       // Audit logging, metrics, webhooks and RBAC are intentionally left at
       // their defaults (all off) so redaction stays fully in-process — no
