@@ -16,7 +16,9 @@ import { OpenRedaction, type PIIPattern } from 'openredaction';
  *  - Norwegian phone numbers, including the +47/0047 country-code and
  *    space-grouped formats the library does not catch out of the box
  *    (custom pattern below)
- *  - Person names (library NER)
+ *  - Person names — only those present in the curated Norwegian name
+ *    dictionary below (the library's built-in NER is disabled; names outside
+ *    the dictionary are NOT redacted)
  *  - Email addresses (library built-in; reserved example/test domains such
  *    as example.com are intentionally treated as non-PII)
  */
@@ -173,16 +175,17 @@ const NORWEGIAN_NAMES: ReadonlySet<string> = new Set(
 
 /**
  * Custom dictionary-based pattern for Norwegian person names. The library's
- * built-in NER misses or only partially masks many Norwegian names (notably
- * leaking part of a hyphenated surname), so this pattern matches any
- * capitalized word and redacts it when it is a known Norwegian first name or
- * surname per {@link NORWEGIAN_NAMES}.
+ * built-in NER is disabled (see {@link getDetector}) because it produced noisy
+ * false positives on Norwegian text, so names are matched solely against the
+ * curated {@link NORWEGIAN_NAMES} dictionary: a capitalized word is redacted
+ * only when its lower-case form is a known Norwegian first name or surname.
  *
- * Words are matched individually (not as greedy multi-word spans) so adjacent
- * non-name capitalized words — e.g. a sentence-initial "Pasient" — are not
- * swallowed. Each component of a hyphenated name ("Solberg-Haugen") is matched
- * separately, so no part leaks. Runs alongside the library NER, which still
- * provides best-effort coverage for names outside the dictionary.
+ * IMPORTANT: names NOT in the dictionary are NOT redacted — coverage is
+ * best-effort and bounded by the list, which should be extended per
+ * deployment. Words are matched individually (not as greedy multi-word spans)
+ * so adjacent non-name capitalized words — e.g. a sentence-initial "Pasient" —
+ * are not swallowed, and each component of a hyphenated name ("Solberg-Haugen")
+ * is matched separately so no part leaks.
  */
 const NORWEGIAN_NAME_PATTERN: PIIPattern = {
   type: 'NAME_NO',
