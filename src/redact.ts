@@ -130,7 +130,10 @@ const NORWEGIAN_FNR_PATTERN: PIIPattern = {
  */
 const NORWEGIAN_PHONE_PATTERN: PIIPattern = {
   type: 'PHONE_NO',
-  regex: /(?:\+47|0047)\s?\d(?:\s?\d){7}|\b\d{2}\s\d{2}\s\d{2}\s\d{2}\b|\b\d{3}\s\d{2}\s\d{3}\b|\b[49]\d{7}\b/g,
+  // Separators are literal spaces (not \s) so a match never spans the
+  // SEGMENT_DELIMITERS (tab/CR/LF) used by redactText — keeping that invariant
+  // true. Norwegian numbers are grouped with spaces, not tabs/newlines.
+  regex: /(?:\+47|0047) ?\d(?: ?\d){7}|\b\d{2} \d{2} \d{2} \d{2}\b|\b\d{3} \d{2} \d{3}\b|\b[49]\d{7}\b/g,
   priority: 80,
   validator: (value: string) => {
     const digits = value.replace(/\D/g, '');
@@ -252,15 +255,22 @@ export async function redactText(text: string): Promise<string> {
   if (!isRedactionEnabled() || !text) return text;
 
   const parts = text.split(SEGMENT_DELIMITERS);
-  const redacted = await Promise.all(
-    parts.map(async (part, index) => {
-      // Odd indices are the captured delimiters — preserve them verbatim.
-      if (index % 2 === 1 || part === '') return part;
-      const result = await getDetector().detect(part);
-      return result.redacted;
-    }),
-  );
-  return redacted.join('');
+  const detector = getDetector();
+  // Segments are processed sequentially (not via Promise.all) because the
+  // detector is a shared singleton: concurrent in-flight detect() calls could
+  // interleave any mutable internal state. Segment counts are small, so the
+  // cost is negligible.
+  const out: string[] = [];
+  for (let index = 0; index < parts.length; index++) {
+    const part = parts[index];
+    // Odd indices are the captured delimiters — preserve them verbatim.
+    if (index % 2 === 1 || part === '') {
+      out.push(part);
+    } else {
+      out.push((await detector.detect(part)).redacted);
+    }
+  }
+  return out.join('');
 }
 
 /**
