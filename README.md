@@ -41,6 +41,36 @@ The server requires the following environment variables:
 
 - `SEQ_BASE_URL` (optional): Your Seq server URL (defaults to 'http://localhost:8080')
 - `SEQ_API_KEY` (required): Your Seq API key
+- `SEQ_REDACTION_ENABLED` (optional): Set to `false` to disable PII redaction (defaults to enabled)
+
+## Privacy / PII Redaction
+
+All log data returned from Seq (events, signals and alert state) is passed
+through a redaction step before it leaves the server, so personal data is
+masked by default. This matters when logs may contain personal data — e.g. in
+a healthcare/EPJ context where GDPR/Personvern applies.
+
+Masked data types:
+
+- **Norwegian national identity numbers** — fødselsnummer and D-numbers,
+  validated with date and MOD11 checks (matched in both string and numeric
+  fields)
+- **Person names**
+- **Email addresses** (reserved example/test domains such as `example.com`
+  are intentionally treated as non-PII)
+- **Phone numbers** — Norwegian formats including `+47`/`0047`, space-grouped
+  numbers and bare mobile numbers (prefix 4 or 9)
+
+Redaction is built on the [`openredaction`](https://www.npmjs.com/package/openredaction)
+library and runs **entirely in-process** — no audit backend, metrics exporter,
+webhook or other network feature is enabled, so log content never leaves the
+server. Replacements are deterministic placeholders (e.g. `[FNR_1234]`,
+`[NAME_5678]`), so the same value maps to the same placeholder within a
+response. Non-personal numeric fields such as status codes, durations and
+timestamps are preserved to keep logs useful for debugging.
+
+Set `SEQ_REDACTION_ENABLED=false` to turn redaction off (e.g. for local
+debugging against a Seq instance with no real personal data).
 
 ## seq-ops Skill
 
