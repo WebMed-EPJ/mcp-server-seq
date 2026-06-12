@@ -40,12 +40,38 @@ describe('redactText', () => {
   });
 
   it('masks a Norwegian person name', async () => {
-    // Locks in regression protection for full-name masking via the library's
-    // NER. Note: name detection is best-effort (see README) — this guards the
-    // common case rather than guaranteeing all names.
+    // Names are matched against a curated Norwegian name dictionary (see
+    // README) — best-effort, guarding the common case rather than every name.
     const out = await redactText('Pasient Kari Nordmann ble innlagt');
     expect(out).not.toContain('Kari Nordmann');
     expect(out).toContain('NAME');
+  });
+
+  it('masks both parts of a hyphenated surname', async () => {
+    const out = await redactText('kontakt Ingrid Solberg-Haugen');
+    expect(out).not.toContain('Solberg');
+    expect(out).not.toContain('Haugen');
+  });
+
+  // Regression guard for the openredaction semicolon limitation (issue #26):
+  // a delimiter in the text must not suppress detection elsewhere.
+  it('still masks PII when the text contains semicolons', async () => {
+    const out = await redactText(
+      `Lege Kari Nordmann; fnr ${VALID_FNR}; e-post ola@helse-bergen.no; tlf +47 99 88 77 66`,
+    );
+    expect(out).not.toContain('Kari Nordmann');
+    expect(out).not.toContain(VALID_FNR);
+    expect(out).not.toContain('ola@helse-bergen.no');
+    expect(out).not.toContain('99 88 77 66');
+    // Delimiters are preserved.
+    expect(out.match(/;/g)?.length).toBe(3);
+  });
+
+  it('masks PII across newline-separated lines', async () => {
+    const out = await redactText('linje1 Kari Nordmann\nlinje2 ola@helse-bergen.no');
+    expect(out).not.toContain('Kari Nordmann');
+    expect(out).not.toContain('ola@helse-bergen.no');
+    expect(out).toContain('\n');
   });
 
   it('masks email addresses', async () => {

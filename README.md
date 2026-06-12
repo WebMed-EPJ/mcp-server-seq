@@ -64,22 +64,34 @@ Masked data types:
 
 ### Limitations
 
-- **Names are best-effort.** Detection relies on the library's NER and is not
-  guaranteed: uncommon names and some hyphenated names may be only partially
-  masked. Fødselsnummer (the strongest identifier) is masked reliably; do not
-  rely on name masking alone as your only safeguard for free-text fields.
+- **Names are best-effort.** Names are matched against a curated dictionary of
+  common Norwegian first names and surnames, so names outside that list are not
+  masked (extend the dictionary in `src/redact.ts` as needed). Fødselsnummer
+  (the strongest identifier) is masked reliably; do not rely on name masking
+  alone as your only safeguard for free-text fields.
 - **Phone over-redaction.** Bare 8-digit numbers starting with 4 or 9 are
   treated as mobile numbers, so an unrelated 8-digit value in a string (e.g.
   an order id) starting with those digits may be masked as a phone number.
   This is a deliberate privacy-first trade-off.
 
 Redaction is built on the [`openredaction`](https://www.npmjs.com/package/openredaction)
-library and runs **entirely in-process** — no audit backend, metrics exporter,
-webhook or other network feature is enabled, so log content never leaves the
-server. Replacements are deterministic placeholders (e.g. `[FNR_1234]`,
-`[NAME_5678]`), so the same value maps to the same placeholder within a
-response. Non-personal numeric fields such as status codes, durations and
-timestamps are preserved to keep logs useful for debugging.
+library (for email) plus Norwegian-tuned custom patterns (fødselsnummer/D-/H-/
+FH-number, phone, name). It runs **entirely in-process** — no audit backend,
+metrics exporter, webhook or other network feature is enabled, so log content
+never leaves the server. Replacements are deterministic placeholders (e.g.
+`[FNR_1234]`, `[NAME_5678]`), so the same value maps to the same placeholder
+within a response. Non-personal numeric fields such as status codes, durations
+and timestamps are preserved to keep logs useful for debugging.
+
+> **Note on the openredaction library.** Its English-centric context-analysis
+> confidence model can silently drop detections in non-English text — notably
+> when a segment contains a delimiter such as a semicolon (upstream issue
+> [#26](https://github.com/sam247/openredaction/issues/26), unfixed in the
+> latest published version). As a workaround, `redactText` splits input on
+> delimiters that no supported PII type spans (`;`, `|`, line breaks, tabs) and
+> redacts each segment independently. This is a mitigation, not a guarantee; if
+> stronger assurances are required, consider replacing the library with a fully
+> in-house deterministic matcher.
 
 Set `SEQ_REDACTION_ENABLED=false` to turn redaction off (e.g. for local
 debugging against a Seq instance with no real personal data).

@@ -223,15 +223,41 @@ function getDetector(): OpenRedaction {
 }
 
 /**
+ * Delimiters that personal data never spans (semicolons, pipes, and
+ * whitespace line breaks/tabs). Used to segment text before detection — see
+ * {@link redactText}. The capturing group preserves the delimiters on split.
+ */
+const SEGMENT_DELIMITERS = /([;|\r\n\t]+)/;
+
+/**
  * Redact personal data from a single string.
+ *
+ * Workaround for an openredaction limitation (upstream issue #26): the
+ * library's English-centric context-analysis confidence model can silently
+ * drop *all* detections in a segment when it contains certain delimiters —
+ * notably a semicolon — which is common in log messages, stack traces and
+ * connection strings. To contain this, the text is split on delimiters that
+ * no supported PII type (fødselsnummer, phone, name, email) ever spans, each
+ * segment is redacted independently, and the original delimiters are restored
+ * exactly. This isolates a poisoned segment so it cannot suppress detection in
+ * the rest of the string.
  *
  * @param text - The text to scan and redact
  * @returns The redacted text (unchanged if redaction is disabled or empty)
  */
 export async function redactText(text: string): Promise<string> {
   if (!isRedactionEnabled() || !text) return text;
-  const result = await getDetector().detect(text);
-  return result.redacted;
+
+  const parts = text.split(SEGMENT_DELIMITERS);
+  const redacted = await Promise.all(
+    parts.map(async (part, index) => {
+      // Odd indices are the captured delimiters — preserve them verbatim.
+      if (index % 2 === 1 || part === '') return part;
+      const result = await getDetector().detect(part);
+      return result.redacted;
+    }),
+  );
+  return redacted.join('');
 }
 
 /**
