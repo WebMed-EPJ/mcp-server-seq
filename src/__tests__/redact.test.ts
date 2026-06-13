@@ -101,6 +101,12 @@ describe('redactText', () => {
     expect(out).toContain('PHONE');
   });
 
+  it('masks a Norwegian phone number in 0047 format', async () => {
+    const out = await redactText('Ring 0047 99 88 77 66 i dag');
+    expect(out).not.toContain('99 88 77 66');
+    expect(out).toContain('PHONE');
+  });
+
   it('does not partially redact a +47 prefix on a longer digit run', async () => {
     // A 10-digit run after +47 is not a valid 8-digit number; it must be left
     // intact rather than having its first 8 digits masked.

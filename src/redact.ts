@@ -143,7 +143,9 @@ const NORWEGIAN_PHONE_PATTERN: PIIPattern = {
   priority: 80,
   validator: (value: string) => {
     const digits = value.replace(/\D/g, '');
-    return digits.length === 8 || (digits.length === 10 && digits.startsWith('47'));
+    // Strip the international "00" so the 0047 form normalises to the 47 form.
+    const normalized = digits.startsWith('0047') ? digits.slice(2) : digits;
+    return normalized.length === 8 || (normalized.length === 10 && normalized.startsWith('47'));
   },
   placeholder: '[PHONE_{n}]',
   description: 'Norwegian phone number',
