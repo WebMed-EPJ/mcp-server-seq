@@ -67,7 +67,10 @@ function isValidNorwegianFnr(match: string): boolean {
     if (day > 40) day -= 40;
     let month = d[2] * 10 + d[3];
     if (month > 40) month -= 40;
-    if (day < 1 || day > 31 || month < 1 || month > 12) return false;
+    // Reject impossible calendar dates (e.g. 31-02). The century is unknown,
+    // so 29 February is always allowed.
+    const daysInMonth = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if (day < 1 || month < 1 || month > 12 || day > daysInMonth[month - 1]) return false;
   }
 
   // MOD11 control digit 1 (position 10).
@@ -133,8 +136,10 @@ const NORWEGIAN_PHONE_PATTERN: PIIPattern = {
   type: 'PHONE_NO',
   // Separators are literal spaces (not \s) so a match never spans the
   // SEGMENT_DELIMITERS (tab/CR/LF) used by redactText — keeping that invariant
-  // true. Norwegian numbers are grouped with spaces, not tabs/newlines.
-  regex: /(?:\+47|0047) ?\d(?: ?\d){7}|\b\d{2} \d{2} \d{2} \d{2}\b|\b\d{3} \d{2} \d{3}\b|\b[49]\d{7}\b/g,
+  // true. Norwegian numbers are grouped with spaces, not tabs/newlines. The
+  // +47/0047 branch is fenced with digit lookarounds so it cannot match a
+  // partial slice of a longer digit run (e.g. "+47 1234567890").
+  regex: /(?<!\d)(?:\+47|0047) ?\d(?: ?\d){7}(?!\d)|\b\d{2} \d{2} \d{2} \d{2}\b|\b\d{3} \d{2} \d{3}\b|\b[49]\d{7}\b/g,
   priority: 80,
   validator: (value: string) => {
     const digits = value.replace(/\D/g, '');
@@ -372,7 +377,11 @@ export async function redactDeep<T>(value: T): Promise<T> {
   }
 
   if (Array.isArray(value)) {
-    return (await Promise.all(value.map((item) => redactDeep(item)))) as unknown as T;
+    // Sequential (not Promise.all) so redactText's detect() calls never run
+    // concurrently against the shared singleton detector — see redactText.
+    const arr: unknown[] = [];
+    for (const item of value) arr.push(await redactDeep(item));
+    return arr as unknown as T;
   }
 
   if (value !== null && typeof value === 'object') {

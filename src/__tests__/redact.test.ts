@@ -101,6 +101,13 @@ describe('redactText', () => {
     expect(out).toContain('PHONE');
   });
 
+  it('does not partially redact a +47 prefix on a longer digit run', async () => {
+    // A 10-digit run after +47 is not a valid 8-digit number; it must be left
+    // intact rather than having its first 8 digits masked.
+    const input = 'ref +47 1234567890 end';
+    expect(await redactText(input)).toBe(input);
+  });
+
   it('returns text unchanged when redaction is disabled', async () => {
     process.env.SEQ_REDACTION_ENABLED = 'false';
     const input = `Pasient ${VALID_FNR}, kari.nordmann@helse-bergen.no`;
