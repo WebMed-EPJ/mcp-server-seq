@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import 'dotenv/config';
+import { redactDeep } from "./redact.js";
 
 // Configuration and constants
 const SEQ_BASE_URL = process.env.SEQ_BASE_URL || 'http://localhost:8080';
@@ -92,10 +93,12 @@ server.resource(
         ownerId: signal.OwnerId
       }));
 
+      const safeSignals = await redactDeep(formattedSignals);
+
       return {
         contents: [{
           uri: 'seq://signals',
-          text: JSON.stringify(formattedSignals, null, 2)
+          text: JSON.stringify(safeSignals, null, 2)
         }]
       };
     } catch (error) {
@@ -161,10 +164,12 @@ server.tool(
         filters: s.Filters
       }));
 
+      const safeSignals = await redactDeep(normalized);
+
       return {
         content: [{
           type: "text",
-          text: JSON.stringify(normalized, null, 2)
+          text: JSON.stringify(safeSignals, null, 2)
         }]
       };
     } catch (error) {
@@ -214,17 +219,22 @@ Tips:
 
       const events = await makeSeqRequest<SeqEvent[]>('/api/events', params);
 
-      let text = JSON.stringify(events, null, 2);
+      // Redact personal data (fødselsnummer, names, email, phone) before the
+      // events leave this process. Done up front so truncation operates on the
+      // redacted payload and never re-exposes unredacted content.
+      const safeEvents = await redactDeep(events);
+
+      let text = JSON.stringify(safeEvents, null, 2);
       let truncated = false;
-      while (text.length > CHARACTER_LIMIT && events.length > 1) {
-        events.splice(Math.ceil(events.length / 2));
-        text = JSON.stringify(events, null, 2);
+      while (text.length > CHARACTER_LIMIT && safeEvents.length > 1) {
+        safeEvents.splice(Math.ceil(safeEvents.length / 2));
+        text = JSON.stringify(safeEvents, null, 2);
         truncated = true;
       }
 
       if (truncated) {
-        const meta = { truncated: true, returned: events.length, truncation_message: `Response exceeded ${CHARACTER_LIMIT} characters. Reduce 'count', narrow the time 'range', or add a 'filter' expression to get more targeted results.` };
-        text = JSON.stringify({ ...meta, events }, null, 2);
+        const meta = { truncated: true, returned: safeEvents.length, truncation_message: `Response exceeded ${CHARACTER_LIMIT} characters. Reduce 'count', narrow the time 'range', or add a 'filter' expression to get more targeted results.` };
+        text = JSON.stringify({ ...meta, events: safeEvents }, null, 2);
       }
 
       return {
@@ -254,11 +264,12 @@ server.tool(
   async () => {
     try {
       const alertState = await makeSeqRequest<Record<string, unknown>>('/api/alertstate');
+      const safeAlertState = await redactDeep(alertState);
 
       return {
         content: [{
           type: "text",
-          text: JSON.stringify(alertState, null, 2)
+          text: JSON.stringify(safeAlertState, null, 2)
         }]
       };
     } catch (error) {

@@ -41,6 +41,63 @@ The server requires the following environment variables:
 
 - `SEQ_BASE_URL` (optional): Your Seq server URL (defaults to 'http://localhost:8080')
 - `SEQ_API_KEY` (required): Your Seq API key
+- `SEQ_REDACTION_ENABLED` (optional): Set to `false` to disable PII redaction (defaults to enabled)
+
+## Privacy / PII Redaction
+
+All log data returned from Seq (events, signals and alert state) is passed
+through a redaction step before it leaves the server, so personal data is
+masked by default. This matters when logs may contain personal data — e.g. in
+a healthcare/EPJ context where GDPR/Personvern applies.
+
+Masked data types:
+
+- **Norwegian national identity numbers** — fødselsnummer, D-numbers,
+  H-numbers and FH-numbers, validated with date and MOD11 checks (matched in
+  both string and numeric fields; numeric values that lost a leading zero are
+  padded and re-checked)
+- **Person names** — best-effort (see limitations below)
+- **Email addresses** (reserved example/test domains such as `example.com`
+  are intentionally treated as non-PII)
+- **Phone numbers** — Norwegian formats including `+47`/`0047`, space-grouped
+  numbers and bare mobile numbers (prefix 4 or 9)
+
+### Limitations
+
+- **Names are best-effort.** Names are matched against a curated dictionary of
+  common Norwegian first names and surnames, so names outside that list are not
+  masked (extend the dictionary in `src/redact.ts` as needed). Dictionary
+  entries that are also common words/log tokens (e.g. "Else", "Per", "Berg")
+  are only masked when part of a multi-token name (e.g. "Per Berg"), to avoid
+  corrupting logs — so such a name appearing alone is not masked. Fødselsnummer
+  (the strongest identifier) is masked reliably; do not rely on name masking
+  alone as your only safeguard for free-text fields.
+- **Phone over-redaction.** Bare 8-digit numbers starting with 4 or 9 are
+  treated as mobile numbers, so an unrelated 8-digit value in a string (e.g.
+  an order id) starting with those digits may be masked as a phone number.
+  This is a deliberate privacy-first trade-off.
+
+Redaction is built on the [`openredaction`](https://www.npmjs.com/package/openredaction)
+library (for email) plus Norwegian-tuned custom patterns (fødselsnummer/D-/H-/
+FH-number, phone, name). It runs **entirely in-process** — no audit backend,
+metrics exporter, webhook or other network feature is enabled, so log content
+never leaves the server. Replacements are deterministic placeholders (e.g.
+`[FNR_1234]`, `[NAME_5678]`), so the same value maps to the same placeholder
+within a response. Non-personal numeric fields such as status codes, durations
+and timestamps are preserved to keep logs useful for debugging.
+
+> **Note on the openredaction library.** Its English-centric context-analysis
+> confidence model can silently drop detections in non-English text — notably
+> when a segment contains a delimiter such as a semicolon (upstream issue
+> [#26](https://github.com/sam247/openredaction/issues/26), unfixed in the
+> latest published version). As a workaround, `redactText` splits input on
+> delimiters that no supported PII type spans (`;`, `|`, line breaks, tabs) and
+> redacts each segment independently. This is a mitigation, not a guarantee; if
+> stronger assurances are required, consider replacing the library with a fully
+> in-house deterministic matcher.
+
+Set `SEQ_REDACTION_ENABLED=false` to turn redaction off (e.g. for local
+debugging against a Seq instance with no real personal data).
 
 ## seq-ops Skill
 
