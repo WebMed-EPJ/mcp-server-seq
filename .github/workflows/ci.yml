@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+jobs:
+  build-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build (typecheck + bundle)
+        run: npm run build
+
+      # The committed self-contained bundle build/seq-server.js is what the
+      # claude-plugins `seq-ops` marketplace plugin actually runs (github-sourced
+      # plugins are not `npm install`-ed). It must never drift from src/ — a stale
+      # bundle would silently ship outdated code, including the PII/fødselsnummer
+      # redaction in src/redact.ts. esbuild is pinned to an exact version so this
+      # check is deterministic across runners.
+      - name: Verify committed bundle is in sync with src/
+        run: |
+          if ! git diff --exit-code -- build/seq-server.js; then
+            echo "::error file=build/seq-server.js::build/seq-server.js is out of date — run 'npm run build' and commit the regenerated bundle"
+            exit 1
+          fi
+
+      - name: Test
+        run: npm test
