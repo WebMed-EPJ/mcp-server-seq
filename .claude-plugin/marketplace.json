@@ -1,13 +1,13 @@
 {
   "name": "mcp-server-seq",
   "owner": {
-    "name": "Ahmad Atighechi",
-    "github": "ahmad2x4"
+    "name": "WebMed-EPJ",
+    "github": "WebMed-EPJ"
   },
   "metadata": {
-    "description": "Seq MCP server with a seq-ops investigation skill for Claude Code. Provides structured log analysis, incident investigation, and health checks against a Seq logging server.",
-    "version": "1.0.1",
-    "repository": "https://github.com/ahmad2x4/mcp-server-seq"
+    "description": "Seq MCP server with a seq-ops investigation skill for Claude Code. Provides structured log analysis, incident investigation, and health checks against a Seq logging server. Log responses are redacted of Norwegian personal data (PII — fødselsnummer, person names, phone numbers, emails) by default for GDPR/Personvern compliance. Originally created by Ahmad Atighechi (@ahmad2x4).",
+    "version": "1.1.0",
+    "repository": "https://github.com/WebMed-EPJ/mcp-server-seq"
   },
   "plugins": [
     {
