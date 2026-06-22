@@ -15,7 +15,9 @@ banner to avoid a collision with OpenRedaction's own inlined `createRequire`). T
 `claude-plugins` marketplace runs the `seq-ops` plugin's MCP server straight from this file via
 `node ${CLAUDE_PLUGIN_ROOT}/build/seq-server.js` — github-sourced plugins are **not** `npm install`-ed,
 so the server must be dependency-free at runtime. **Re-run `npm run build` and re-commit
-`build/seq-server.js` after any `src/` change**, or the plugin ships stale server code.
+`build/seq-server.js` after any `src/` change**, or the plugin ships stale server code. CI
+(`.github/workflows/ci.yml`) enforces this: it rebuilds and fails if the committed bundle drifts
+from `src/`. `esbuild` is pinned to an exact version so the bundle is byte-reproducible.
 
 ## Code Style Guidelines
 - **Imports**: Use ESM-style imports (`import x from 'y'`) with `.js` extension for local imports
