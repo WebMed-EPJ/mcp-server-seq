@@ -109,7 +109,7 @@ async function runTests() {
     const toDateUtc = new Date().toISOString();
     const fromDateUtc = new Date(Date.now() - 86_400_000).toISOString(); // last 24h
     const queryResult = await makeSeqRequest<{ Columns?: string[]; Rows?: unknown[] }>('/api/data', {
-      q: 'select count(*) from stream group by @Level',
+      q: 'select @Level, count(*) as Count from stream group by @Level',
       rangeStartUtc: fromDateUtc,
       rangeEndUtc: toDateUtc
     });
