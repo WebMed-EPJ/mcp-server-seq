@@ -104,6 +104,19 @@ async function runTests() {
       console.log();
     }
 
+    // Test 5: SQL query (aggregation) via /api/data
+    console.log('Test 5: Running a SQL aggregation query...');
+    const toDateUtc = new Date().toISOString();
+    const fromDateUtc = new Date(Date.now() - 86_400_000).toISOString(); // last 24h
+    const queryResult = await makeSeqRequest<{ Columns?: string[]; Rows?: unknown[] }>('/api/data', {
+      q: 'select count(*) from stream group by @Level',
+      rangeStartUtc: fromDateUtc,
+      rangeEndUtc: toDateUtc
+    });
+    console.log(`✓ Successfully ran query (${queryResult.Rows?.length ?? 0} rows)`);
+    console.log('Query result:', JSON.stringify(queryResult, null, 2));
+    console.log();
+
   } catch (error) {
     if (error instanceof Error) {
       console.error('Test failed:', error.message);

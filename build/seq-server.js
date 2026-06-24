@@ -22379,6 +22379,41 @@ async function redactDeep(value) {
   return value;
 }
 
+// src/timerange.ts
+var RANGE_MS = {
+  "1m": 6e4,
+  "15m": 15 * 6e4,
+  "30m": 30 * 6e4,
+  "1h": 36e5,
+  "2h": 2 * 36e5,
+  "6h": 6 * 36e5,
+  "12h": 12 * 36e5,
+  "1d": 864e5,
+  "7d": 7 * 864e5,
+  "14d": 14 * 864e5,
+  "30d": 30 * 864e5
+};
+var DEFAULT_QUERY_RANGE_MS = RANGE_MS["1d"];
+function resolveDataRange(input, now) {
+  const { range, fromDateUtc, toDateUtc } = input;
+  if (range) {
+    return {
+      rangeStartUtc: new Date(now - RANGE_MS[range]).toISOString(),
+      rangeEndUtc: new Date(now).toISOString()
+    };
+  }
+  if (fromDateUtc || toDateUtc) {
+    return {
+      rangeStartUtc: fromDateUtc ?? new Date(now - DEFAULT_QUERY_RANGE_MS).toISOString(),
+      rangeEndUtc: toDateUtc ?? new Date(now).toISOString()
+    };
+  }
+  return {
+    rangeStartUtc: new Date(now - DEFAULT_QUERY_RANGE_MS).toISOString(),
+    rangeEndUtc: new Date(now).toISOString()
+  };
+}
+
 // src/seq-server.ts
 var SEQ_BASE_URL = process.env.SEQ_BASE_URL || "http://localhost:8080";
 var SEQ_API_KEY = process.env.SEQ_API_KEY || "";
@@ -22462,6 +22497,15 @@ var eventsSchema = z.object({
   range: timeRangeSchema.optional().describe("Relative time range; takes precedence over fromDateUtc/toDateUtc. Options: 1m, 15m, 30m, 1h, 2h, 6h, 12h, 1d, 7d, 14d, 30d"),
   after: z.string().optional().describe("Pagination cursor: pass the last event ID from a previous response to fetch the next page"),
   render: z.boolean().optional().default(false).describe("Render message templates into human-readable strings (adds RenderedMessage to each event)")
+}).strict();
+var dataSchema = z.object({
+  query: z.string().min(1).describe(
+    `Seq SQL query. Use 'from stream' for tabular/aggregate queries, e.g. "select count(*) from stream group by @Level" or "select RequestPath, count(*) from stream where StatusCode >= 500 group by RequestPath order by count(*) desc limit 20". Supports aggregate operators (count, sum, mean, percentile, distinct) and time slicing via group by time(<n><unit>). Add a 'limit' clause to bound large rowsets.`
+  ),
+  signal: z.string().optional().describe("Comma-separated signal IDs to scope the query (get IDs from get_signals)"),
+  fromDateUtc: z.string().optional().describe('Start of time range in UTC ISO 8601, e.g. "2024-01-15T10:00:00Z"'),
+  toDateUtc: z.string().optional().describe('End of time range in UTC ISO 8601, e.g. "2024-01-15T11:00:00Z"'),
+  range: timeRangeSchema.optional().describe("Relative time range; takes precedence over fromDateUtc/toDateUtc. Options: 1m, 15m, 30m, 1h, 2h, 6h, 12h, 1d, 7d, 14d, 30d. Defaults to the last 24h (1d) when omitted")
 }).strict();
 server.tool(
   "get_signals",
@@ -22581,6 +22625,68 @@ server.tool(
         content: [{
           type: "text",
           text: `Error fetching alert state: ${err.message}. Verify the Seq server is reachable at ${SEQ_BASE_URL}.`
+        }],
+        isError: true
+      };
+    }
+  }
+);
+server.tool(
+  "sql_query",
+  `Run a Seq SQL-style query for aggregations and tabular analysis (https://datalust.co/docs/sql-queries).
+
+Use this \u2014 not get_events \u2014 when you need counts, sums, means, percentiles, distinct values, group-by breakdowns, or time-series. get_events returns raw rows; sql_query computes the aggregate server-side, avoiding pulling and counting rows client-side.
+
+Examples:
+- Errors per service: select ServiceName, count(*) from stream where @Level = 'Error' group by ServiceName order by count(*) desc
+- p95 latency over time: select percentile(Elapsed, 95) from stream group by time(5m)
+- Top failing endpoints: select RequestPath, count(*) from stream where StatusCode >= 500 group by RequestPath order by count(*) desc limit 20
+
+Tips:
+- Call get_signals first to scope the query to a service/category via the 'signal' parameter
+- Default time window is the last 24h; set 'range' or fromDateUtc/toDateUtc to change it
+- Add a 'limit' clause to large rowsets, or group at a coarser level, if results are truncated`,
+  dataSchema.shape,
+  async ({ query, signal, fromDateUtc, toDateUtc, range }) => {
+    try {
+      const { rangeStartUtc, rangeEndUtc } = resolveDataRange(
+        { range, fromDateUtc, toDateUtc },
+        Date.now()
+      );
+      const params = {
+        q: query,
+        rangeStartUtc,
+        rangeEndUtc
+      };
+      if (signal) params.signal = signal;
+      const data = await makeSeqRequest("/api/data", params);
+      const safeData = await redactDeep(data);
+      let text = JSON.stringify(safeData, null, 2);
+      if (text.length > CHARACTER_LIMIT && Array.isArray(safeData.Rows) && safeData.Rows.length > 1) {
+        const rows = safeData.Rows;
+        while (text.length > CHARACTER_LIMIT && rows.length > 1) {
+          rows.splice(Math.ceil(rows.length / 2));
+          text = JSON.stringify(safeData, null, 2);
+        }
+        const meta = {
+          truncated: true,
+          returnedRows: rows.length,
+          truncation_message: `Response exceeded ${CHARACTER_LIMIT} characters and rows were truncated. Add a 'limit' clause, narrow the time range, or group at a coarser level.`
+        };
+        text = JSON.stringify({ ...meta, ...safeData }, null, 2);
+      }
+      return {
+        content: [{
+          type: "text",
+          text
+        }]
+      };
+    } catch (error) {
+      const err = error;
+      return {
+        content: [{
+          type: "text",
+          text: `Error running query: ${err.message}. Check the SQL syntax (see https://datalust.co/docs/sql-queries) \u2014 use 'from stream' for tabular/aggregate queries \u2014 and that any signal IDs exist (use get_signals to list them).`
         }],
         isError: true
       };
