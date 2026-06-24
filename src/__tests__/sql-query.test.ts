@@ -63,10 +63,10 @@ describe('resolveDataRange', () => {
     ).toThrow(/fromDateUtc .* is after toDateUtc/);
   });
 
-  it('throws when a from-only bound is in the future (after now)', () => {
+  it('throws when a from-only bound is in the future, naming "the current time" not toDateUtc', () => {
     expect(() =>
       resolveDataRange({ fromDateUtc: '2026-06-25T00:00:00Z' }, NOW) // NOW is 2026-06-24T12:00Z
-    ).toThrow(RangeError);
+    ).toThrow(/is after the current time/);
   });
 
   it('accepts an equal from/to instant', () => {

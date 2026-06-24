@@ -83,7 +83,10 @@ export function resolveDataRange(
     const startMs = Date.parse(rangeStartUtc);
     const finalEndMs = Date.parse(rangeEndUtc);
     if (!Number.isNaN(startMs) && !Number.isNaN(finalEndMs) && startMs > finalEndMs) {
-      throw new RangeError(`Invalid time range: fromDateUtc (${rangeStartUtc}) is after toDateUtc (${rangeEndUtc}).`);
+      // Name the end bound by its real source: an explicit toDateUtc, or the
+      // current time when only a (future) fromDateUtc was given.
+      const endLabel = toDateUtc ? `toDateUtc (${rangeEndUtc})` : `the current time (${rangeEndUtc})`;
+      throw new RangeError(`Invalid time range: fromDateUtc (${rangeStartUtc}) is after ${endLabel}.`);
     }
 
     return { rangeStartUtc, rangeEndUtc };
