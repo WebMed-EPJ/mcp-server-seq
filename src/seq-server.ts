@@ -129,9 +129,9 @@ const eventsSchema = z.object({
   count: z.number().min(1).max(MAX_EVENTS).optional()
     .default(20)
     .describe(`Number of events to return (1–${MAX_EVENTS}, default 20)`),
-  fromDateUtc: z.string().optional()
+  fromDateUtc: z.string().datetime({ offset: true }).optional()
     .describe('Start of time range in UTC ISO 8601, e.g. "2024-01-15T10:00:00Z"'),
-  toDateUtc: z.string().optional()
+  toDateUtc: z.string().datetime({ offset: true }).optional()
     .describe('End of time range in UTC ISO 8601, e.g. "2024-01-15T11:00:00Z"'),
   range: timeRangeSchema.optional()
     .describe('Relative time range; takes precedence over fromDateUtc/toDateUtc. Options: 1m, 15m, 30m, 1h, 2h, 6h, 12h, 1d, 7d, 14d, 30d'),
@@ -153,9 +153,9 @@ const dataSchema = z.object({
     ),
   signal: z.string().optional()
     .describe('Comma-separated signal IDs to scope the query (get IDs from get_signals)'),
-  fromDateUtc: z.string().optional()
+  fromDateUtc: z.string().datetime({ offset: true }).optional()
     .describe('Start of time range in UTC ISO 8601, e.g. "2024-01-15T10:00:00Z"'),
-  toDateUtc: z.string().optional()
+  toDateUtc: z.string().datetime({ offset: true }).optional()
     .describe('End of time range in UTC ISO 8601, e.g. "2024-01-15T11:00:00Z"'),
   range: timeRangeSchema.optional()
     .describe('Relative time range; takes precedence over fromDateUtc/toDateUtc. Options: 1m, 15m, 30m, 1h, 2h, 6h, 12h, 1d, 7d, 14d, 30d. Defaults to the last 24h (1d) when omitted')

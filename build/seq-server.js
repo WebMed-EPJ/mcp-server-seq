@@ -22405,10 +22405,14 @@ function resolveDataRange(input, now) {
   if (fromDateUtc || toDateUtc) {
     const parsedTo = toDateUtc ? Date.parse(toDateUtc) : now;
     const endMs = Number.isNaN(parsedTo) ? now : parsedTo;
-    return {
-      rangeStartUtc: fromDateUtc ?? new Date(endMs - DEFAULT_QUERY_RANGE_MS).toISOString(),
-      rangeEndUtc: toDateUtc ?? new Date(now).toISOString()
-    };
+    const rangeStartUtc = fromDateUtc ?? new Date(endMs - DEFAULT_QUERY_RANGE_MS).toISOString();
+    const rangeEndUtc = toDateUtc ?? new Date(now).toISOString();
+    const startMs = Date.parse(rangeStartUtc);
+    const finalEndMs = Date.parse(rangeEndUtc);
+    if (!Number.isNaN(startMs) && !Number.isNaN(finalEndMs) && startMs > finalEndMs) {
+      throw new RangeError(`Invalid time range: fromDateUtc (${rangeStartUtc}) is after toDateUtc (${rangeEndUtc}).`);
+    }
+    return { rangeStartUtc, rangeEndUtc };
   }
   return {
     rangeStartUtc: new Date(now - DEFAULT_QUERY_RANGE_MS).toISOString(),
@@ -22494,8 +22498,8 @@ var eventsSchema = z.object({
   signal: z.string().optional().describe("Comma-separated signal IDs to scope results (get IDs from seq_get_signals)"),
   filter: z.string().optional().describe(`Seq filter expression, e.g. "@Level = 'Error'" or "StatusCode >= 500"`),
   count: z.number().min(1).max(MAX_EVENTS).optional().default(20).describe(`Number of events to return (1\u2013${MAX_EVENTS}, default 20)`),
-  fromDateUtc: z.string().optional().describe('Start of time range in UTC ISO 8601, e.g. "2024-01-15T10:00:00Z"'),
-  toDateUtc: z.string().optional().describe('End of time range in UTC ISO 8601, e.g. "2024-01-15T11:00:00Z"'),
+  fromDateUtc: z.string().datetime({ offset: true }).optional().describe('Start of time range in UTC ISO 8601, e.g. "2024-01-15T10:00:00Z"'),
+  toDateUtc: z.string().datetime({ offset: true }).optional().describe('End of time range in UTC ISO 8601, e.g. "2024-01-15T11:00:00Z"'),
   range: timeRangeSchema.optional().describe("Relative time range; takes precedence over fromDateUtc/toDateUtc. Options: 1m, 15m, 30m, 1h, 2h, 6h, 12h, 1d, 7d, 14d, 30d"),
   after: z.string().optional().describe("Pagination cursor: pass the last event ID from a previous response to fetch the next page"),
   render: z.boolean().optional().default(false).describe("Render message templates into human-readable strings (adds RenderedMessage to each event)")
@@ -22505,8 +22509,8 @@ var dataSchema = z.object({
     `Seq SQL query. Use 'from stream' for tabular/aggregate queries, e.g. "select count(*) from stream group by @Level" or "select RequestPath, count(*) from stream where StatusCode >= 500 group by RequestPath order by count(*) desc limit 20". Supports aggregate operators (count, sum, mean, percentile, distinct) and time slicing via group by time(<n><unit>). Add a 'limit' clause to bound large rowsets.`
   ),
   signal: z.string().optional().describe("Comma-separated signal IDs to scope the query (get IDs from get_signals)"),
-  fromDateUtc: z.string().optional().describe('Start of time range in UTC ISO 8601, e.g. "2024-01-15T10:00:00Z"'),
-  toDateUtc: z.string().optional().describe('End of time range in UTC ISO 8601, e.g. "2024-01-15T11:00:00Z"'),
+  fromDateUtc: z.string().datetime({ offset: true }).optional().describe('Start of time range in UTC ISO 8601, e.g. "2024-01-15T10:00:00Z"'),
+  toDateUtc: z.string().datetime({ offset: true }).optional().describe('End of time range in UTC ISO 8601, e.g. "2024-01-15T11:00:00Z"'),
   range: timeRangeSchema.optional().describe("Relative time range; takes precedence over fromDateUtc/toDateUtc. Options: 1m, 15m, 30m, 1h, 2h, 6h, 12h, 1d, 7d, 14d, 30d. Defaults to the last 24h (1d) when omitted")
 }).strict();
 server.tool(

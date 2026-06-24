@@ -57,6 +57,27 @@ describe('resolveDataRange', () => {
     expect(rangeStartUtc).toBe('2026-06-23T12:00:00.000Z');
   });
 
+  it('throws when fromDateUtc is later than toDateUtc', () => {
+    expect(() =>
+      resolveDataRange({ fromDateUtc: '2026-06-24T00:00:00Z', toDateUtc: '2026-06-23T00:00:00Z' }, NOW)
+    ).toThrow(/fromDateUtc .* is after toDateUtc/);
+  });
+
+  it('throws when a from-only bound is in the future (after now)', () => {
+    expect(() =>
+      resolveDataRange({ fromDateUtc: '2026-06-25T00:00:00Z' }, NOW) // NOW is 2026-06-24T12:00Z
+    ).toThrow(RangeError);
+  });
+
+  it('accepts an equal from/to instant', () => {
+    const { rangeStartUtc, rangeEndUtc } = resolveDataRange(
+      { fromDateUtc: '2026-06-24T00:00:00Z', toDateUtc: '2026-06-24T00:00:00Z' },
+      NOW
+    );
+    expect(rangeStartUtc).toBe('2026-06-24T00:00:00Z');
+    expect(rangeEndUtc).toBe('2026-06-24T00:00:00Z');
+  });
+
   it('covers every range option exposed by the schema', () => {
     expect(Object.keys(RANGE_MS)).toEqual([
       '1m', '15m', '30m', '1h', '2h', '6h', '12h', '1d', '7d', '14d', '30d',

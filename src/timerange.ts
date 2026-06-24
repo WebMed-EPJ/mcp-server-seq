@@ -71,10 +71,22 @@ export function resolveDataRange(
     // produce an inverted start>end range that Seq rejects or returns empty for.
     const parsedTo = toDateUtc ? Date.parse(toDateUtc) : now;
     const endMs = Number.isNaN(parsedTo) ? now : parsedTo; // malformed `to` falls through to Seq for a clear error
-    return {
-      rangeStartUtc: fromDateUtc ?? new Date(endMs - DEFAULT_QUERY_RANGE_MS).toISOString(),
-      rangeEndUtc: toDateUtc ?? new Date(now).toISOString(),
-    };
+    const rangeStartUtc = fromDateUtc ?? new Date(endMs - DEFAULT_QUERY_RANGE_MS).toISOString();
+    const rangeEndUtc = toDateUtc ?? new Date(now).toISOString();
+
+    // Reject an explicit start that is after the end (e.g. fromDateUtc later
+    // than toDateUtc, or a future fromDateUtc with no toDateUtc). The schema
+    // validates each bound's ISO format, but cross-field ordering can only be
+    // enforced here — server.tool() rebuilds the param schema from the raw
+    // shape, dropping any object-level refinement. Surfaced as a tool error
+    // before any Seq request is made.
+    const startMs = Date.parse(rangeStartUtc);
+    const finalEndMs = Date.parse(rangeEndUtc);
+    if (!Number.isNaN(startMs) && !Number.isNaN(finalEndMs) && startMs > finalEndMs) {
+      throw new RangeError(`Invalid time range: fromDateUtc (${rangeStartUtc}) is after toDateUtc (${rangeEndUtc}).`);
+    }
+
+    return { rangeStartUtc, rangeEndUtc };
   }
 
   return {
