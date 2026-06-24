@@ -22,6 +22,15 @@ MCP Server for Seq's API endpoints for interacting with your logging and monitor
   - Flexible time range options
   - Date range filtering
 
+#### Querying & Aggregation
+- `sql_query` - Run a [Seq SQL-style query](https://datalust.co/docs/sql-queries) for aggregations and tabular analysis
+  - Aggregate operators: `count`, `sum`, `mean`, `percentile`, `distinct`
+  - `group by` breakdowns and `time(<n><unit>)` time-slicing
+  - Scope to signals; flexible/relative time range (defaults to last 24h)
+  - Use this instead of `get_events` for counts/rollups — the aggregation runs
+    server-side rather than pulling raw rows and counting client-side
+  - Example: `select RequestPath, count(*) from stream where StatusCode >= 500 group by RequestPath order by count(*) desc limit 20`
+
 #### Alert Management
 - `get_alert_state` - Retrieve the current state of alerts
 
@@ -45,9 +54,11 @@ The server requires the following environment variables:
 
 ## Privacy / PII Redaction
 
-All log data returned from Seq (events, signals and alert state) is passed
-through a redaction step before it leaves the server, so personal data is
-masked by default. This matters when logs may contain personal data — e.g. in
+All log data returned from Seq (events, signals, alert state and `sql_query`
+results) is passed through a redaction step before it leaves the server, so
+personal data is masked by default. Because a `sql_query` can `select` arbitrary
+columns — including `@Properties` that may carry fødselsnummer, names or emails —
+the entire rowset is redacted, not just event messages. This matters when logs may contain personal data — e.g. in
 a healthcare/EPJ context where GDPR/Personvern applies.
 
 Masked data types:
@@ -185,7 +196,8 @@ npm run test-script
 
 ## Time Range Options
 
-The `get-events` tool supports the following time range options:
+The `get_events` and `sql_query` tools support the following relative time range
+options (`sql_query` defaults to `1d` / last 24h when none is given):
 - `1m` - Last minute
 - `15m` - Last 15 minutes
 - `30m` - Last 30 minutes
