@@ -22403,8 +22403,10 @@ function resolveDataRange(input, now) {
     };
   }
   if (fromDateUtc || toDateUtc) {
+    const parsedTo = toDateUtc ? Date.parse(toDateUtc) : now;
+    const endMs = Number.isNaN(parsedTo) ? now : parsedTo;
     return {
-      rangeStartUtc: fromDateUtc ?? new Date(now - DEFAULT_QUERY_RANGE_MS).toISOString(),
+      rangeStartUtc: fromDateUtc ?? new Date(endMs - DEFAULT_QUERY_RANGE_MS).toISOString(),
       rangeEndUtc: toDateUtc ?? new Date(now).toISOString()
     };
   }
@@ -22664,16 +22666,17 @@ Tips:
       let text = JSON.stringify(safeData, null, 2);
       if (text.length > CHARACTER_LIMIT && Array.isArray(safeData.Rows) && safeData.Rows.length > 1) {
         const rows = safeData.Rows;
-        while (text.length > CHARACTER_LIMIT && rows.length > 1) {
-          rows.splice(Math.ceil(rows.length / 2));
-          text = JSON.stringify(safeData, null, 2);
-        }
-        const meta = {
+        const withMeta = () => ({
           truncated: true,
           returnedRows: rows.length,
-          truncation_message: `Response exceeded ${CHARACTER_LIMIT} characters and rows were truncated. Add a 'limit' clause, narrow the time range, or group at a coarser level.`
-        };
-        text = JSON.stringify({ ...meta, ...safeData }, null, 2);
+          truncation_message: `Response exceeded ${CHARACTER_LIMIT} characters and rows were truncated. Add a 'limit' clause, narrow the time range, or group at a coarser level.`,
+          ...safeData
+        });
+        text = JSON.stringify(withMeta(), null, 2);
+        while (text.length > CHARACTER_LIMIT && rows.length > 1) {
+          rows.splice(Math.ceil(rows.length / 2));
+          text = JSON.stringify(withMeta(), null, 2);
+        }
       }
       return {
         content: [{

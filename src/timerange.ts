@@ -64,8 +64,15 @@ export function resolveDataRange(
   }
 
   if (fromDateUtc || toDateUtc) {
+    // Derive a missing bound relative to the one provided, not relative to
+    // `now`. A `from`-only query reads "everything since then" (from..now); a
+    // `to`-only query reads "the 24h window ending then" ((to-24h)..to). Anchor
+    // the to-only start on `toDateUtc` so a `toDateUtc` older than 24h ago can't
+    // produce an inverted start>end range that Seq rejects or returns empty for.
+    const parsedTo = toDateUtc ? Date.parse(toDateUtc) : now;
+    const endMs = Number.isNaN(parsedTo) ? now : parsedTo; // malformed `to` falls through to Seq for a clear error
     return {
-      rangeStartUtc: fromDateUtc ?? new Date(now - DEFAULT_QUERY_RANGE_MS).toISOString(),
+      rangeStartUtc: fromDateUtc ?? new Date(endMs - DEFAULT_QUERY_RANGE_MS).toISOString(),
       rangeEndUtc: toDateUtc ?? new Date(now).toISOString(),
     };
   }

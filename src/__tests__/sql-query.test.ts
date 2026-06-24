@@ -30,13 +30,25 @@ describe('resolveDataRange', () => {
   });
 
   it('fills a missing bound when only one explicit date is given', () => {
+    // from-only reads "everything since then": from..now.
     const onlyFrom = resolveDataRange({ fromDateUtc: '2026-06-23T00:00:00Z' }, NOW);
     expect(onlyFrom.rangeStartUtc).toBe('2026-06-23T00:00:00Z');
     expect(onlyFrom.rangeEndUtc).toBe('2026-06-24T12:00:00.000Z');
 
+    // to-only reads "the 24h window ending then": (to-24h)..to — anchored on
+    // toDateUtc, not now.
     const onlyTo = resolveDataRange({ toDateUtc: '2026-06-24T06:00:00Z' }, NOW);
-    expect(onlyTo.rangeStartUtc).toBe('2026-06-23T12:00:00.000Z'); // now - 24h
+    expect(onlyTo.rangeStartUtc).toBe('2026-06-23T06:00:00.000Z'); // to - 24h
     expect(onlyTo.rangeEndUtc).toBe('2026-06-24T06:00:00Z');
+  });
+
+  it('does not invert the range for a toDateUtc older than 24h ago', () => {
+    // Regression: previously start defaulted to now-24h, landing *after* a
+    // historical toDateUtc and producing an empty/inverted range.
+    const historicalTo = resolveDataRange({ toDateUtc: '2026-06-20T00:00:00Z' }, NOW);
+    expect(historicalTo.rangeStartUtc).toBe('2026-06-19T00:00:00.000Z'); // to - 24h, not now - 24h
+    expect(historicalTo.rangeEndUtc).toBe('2026-06-20T00:00:00Z');
+    expect(Date.parse(historicalTo.rangeStartUtc)).toBeLessThan(Date.parse(historicalTo.rangeEndUtc));
   });
 
   it('defaults to the last 24 hours when no range is supplied', () => {
