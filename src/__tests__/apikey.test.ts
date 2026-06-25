@@ -1,13 +1,16 @@
 import { resolveApiKey, type CommandRunner } from '../apikey.js';
 
 /** Records the commands it was asked to run and returns a canned/computed result. */
-function spyRunner(impl: (cmd: string) => string): CommandRunner & { calls: string[] } {
+function spyRunner(impl: (cmd: string) => string): CommandRunner & { calls: string[]; timeouts: number[] } {
   const calls: string[] = [];
-  const fn = ((cmd: string) => {
+  const timeouts: number[] = [];
+  const fn = ((cmd: string, timeoutMs: number) => {
     calls.push(cmd);
+    timeouts.push(timeoutMs);
     return impl(cmd);
-  }) as CommandRunner & { calls: string[] };
+  }) as CommandRunner & { calls: string[]; timeouts: number[] };
   fn.calls = calls;
+  fn.timeouts = timeouts;
   return fn;
 }
 
@@ -71,6 +74,8 @@ describe('resolveApiKey', () => {
     });
     expect(() => resolveApiKey({ SEQ_API_KEY_CMD: 'sleep 999', SEQ_API_KEY_CMD_TIMEOUT_MS: '5000' }, run))
       .toThrow(/timed out after 5000ms/);
+    // The timeout enforced by the runner is the same value reported on failure.
+    expect(run.timeouts).toEqual([5000]);
   });
 
   it('throws when the command produces no output', () => {

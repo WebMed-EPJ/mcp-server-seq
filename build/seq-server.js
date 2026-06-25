@@ -22430,10 +22430,10 @@ function commandTimeoutMs(env) {
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_CMD_TIMEOUT_MS;
 }
-var defaultRunner = (command) => execSync(command, {
+var defaultRunner = (command, timeoutMs) => execSync(command, {
   encoding: "utf8",
   stdio: ["ignore", "pipe", "pipe"],
-  timeout: commandTimeoutMs(process.env)
+  timeout: timeoutMs
 });
 function failureReason(error, timeoutMs) {
   const e = error ?? {};
@@ -22447,12 +22447,13 @@ function resolveApiKey(env, run = defaultRunner) {
   if (direct) return direct;
   const command = env.SEQ_API_KEY_CMD?.trim();
   if (command) {
+    const timeoutMs = commandTimeoutMs(env);
     let output;
     try {
-      output = run(command);
+      output = run(command, timeoutMs);
     } catch (error) {
       throw new Error(
-        `SEQ_API_KEY_CMD ${failureReason(error, commandTimeoutMs(env))}. Run the configured command manually to see its error output.`
+        `SEQ_API_KEY_CMD ${failureReason(error, timeoutMs)}. Run the configured command manually to see its error output.`
       );
     }
     const key = output.trim();

@@ -31,8 +31,12 @@ export interface ApiKeyEnv {
   [key: string]: string | undefined;
 }
 
-/** Runs a shell command and returns its stdout. Injected for testability. */
-export type CommandRunner = (command: string) => string;
+/**
+ * Runs a shell command, bounded by `timeoutMs`, and returns its stdout.
+ * Injected for testability. The timeout is passed in (not read from the
+ * environment) so enforcement and the reported value share one source of truth.
+ */
+export type CommandRunner = (command: string, timeoutMs: number) => string;
 
 /** Default timeout (ms) for SEQ_API_KEY_CMD when SEQ_API_KEY_CMD_TIMEOUT_MS is unset or invalid. */
 const DEFAULT_CMD_TIMEOUT_MS = 30_000;
@@ -68,13 +72,14 @@ function commandTimeoutMs(env: ApiKeyEnv): number {
  * support pipelines and expansions.
  *
  * @param command - The shell command to execute
+ * @param timeoutMs - Maximum time the command may run before it is killed
  * @returns The command's stdout
  */
-const defaultRunner: CommandRunner = (command) =>
+const defaultRunner: CommandRunner = (command, timeoutMs) =>
   execSync(command, {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: commandTimeoutMs(process.env),
+    timeout: timeoutMs,
   });
 
 /**
@@ -115,13 +120,16 @@ export function resolveApiKey(env: ApiKeyEnv, run: CommandRunner = defaultRunner
 
   const command = env.SEQ_API_KEY_CMD?.trim();
   if (command) {
+    // Resolve the timeout once so the value enforced by the runner and the value
+    // reported on a timeout failure share a single source of truth.
+    const timeoutMs = commandTimeoutMs(env);
     let output: string;
     try {
-      output = run(command);
+      output = run(command, timeoutMs);
     } catch (error) {
       // Report only a bounded, non-sensitive reason — see failureReason().
       throw new Error(
-        `SEQ_API_KEY_CMD ${failureReason(error, commandTimeoutMs(env))}. ` +
+        `SEQ_API_KEY_CMD ${failureReason(error, timeoutMs)}. ` +
         `Run the configured command manually to see its error output.`
       );
     }
