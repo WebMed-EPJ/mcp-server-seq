@@ -43,10 +43,14 @@ Always start here:
 1. `seq:get_alert_state` → any currently firing alerts?
 2. `seq:get_signals` → what named filters exist? Note their IDs — they're your shortcuts.
 
-**Scoping to a customer / office (WebMed prod).** Each customer (legekontor / office) is a distinct tenant identified by its unique name in the **`Environment`** property on every event. In production, each one has a saved signal named **`WebMed - "{Name}"`** (e.g. `WebMed - "Storgata Legesenter"`). So when the user names a customer:
-- Call `get_signals` and match the title `WebMed - "{Name}"`, then pass that signal `id` to `get_events`/`sql_query` — this is the reliable way to scope, since it encodes exactly how that tenant is filtered.
-- Or filter directly on the property: `filter: Environment = '{Name}'`.
-- Don't have the exact name? `get_signals` lists every `WebMed - "…"` title, so you can confirm spelling/casing before querying.
+**Scoping to a customer / office (WebMed prod).** Each customer (legekontor / office) is a distinct tenant. Every event carries an **`Environment`** property whose value is the tenant's **lowercase slug** (e.g. `storoklinikken`). In production each tenant also has a saved signal titled **`WebMed - {Name}`** using the display name. The two differ in case — and the slug may drop spaces:
+
+> Signal `WebMed - Storoklinikken`  ⇄  `Environment = 'storoklinikken'`
+
+So when the user names a customer:
+- **Preferred:** call `get_signals`, match the title by its `WebMed -` prefix plus the name (match loosely — spacing/casing vary), and pass that signal `id` to `get_events`/`sql_query`. The signal encodes the exact tenant filter, so you never have to guess the slug.
+- **Direct filter:** `filter: Environment = '{slug}'` with the lowercased name, e.g. `Environment = 'storoklinikken'`.
+- Unsure of the slug or spelling? `get_signals` returns every `WebMed - …` title *and its filter* — confirm there before querying.
 
 ### Step 2 — Scope
 Pick a time range based on what you know:
@@ -120,7 +124,7 @@ StatusCode >= 500
 RequestPath like '/api/checkout%'
 Application = 'my-service'
 UserId = 'user-123'
-Environment = 'Storgata Legesenter'   # customer/office tenant (prod signal: WebMed - "Storgata Legesenter")
+Environment = 'storoklinikken'   # tenant slug — lowercase (prod signal: WebMed - Storoklinikken)
 
 # Combining
 @Level = 'Error' and Application = 'payments' and StatusCode >= 500
@@ -204,8 +208,8 @@ Keep it actionable — the person reading this may be mid-incident. Lead with wh
 → Look for timeout patterns: `@Message like '%timeout%' or @Exception like '%TimeoutException%'`
 
 **Single customer / office reported a problem**
-→ Find their signal via `get_signals` (title `WebMed - "{Name}"`) and scope with its `id`, or filter `Environment = '{Name}'`
-→ Then quantify: `sql_query` → `select count(*) from stream where @Level = 'Error' and Environment = '{Name}' group by time(5m)`
+→ Find their signal via `get_signals` (title `WebMed - {Name}`) and scope with its `id`, or filter on the lowercase slug `Environment = '{slug}'`
+→ Then quantify: `sql_query` → `select count(*) from stream where @Level = 'Error' and Environment = 'storoklinikken' group by time(5m)`
 → Compare against the fleet — is only this office affected, or is it a broader incident?
 
 **Which customers are affected? (cross-tenant triage)**
