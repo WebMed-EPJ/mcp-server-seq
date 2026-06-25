@@ -46,18 +46,19 @@ MCP Server for Seq's API endpoints for interacting with your logging and monitor
 
 ## Configuration
 
-The server requires the following environment variables:
+The server reads the following environment variables:
 
 - `SEQ_BASE_URL` (optional): Your Seq server URL (defaults to 'http://localhost:8080')
-- `SEQ_API_KEY` (required\*): Your Seq API key
-- `SEQ_API_KEY_CMD` (optional): A command, run once at startup, whose stdout is used
+- `SEQ_API_KEY` (see note\*): Your Seq API key
+- `SEQ_API_KEY_CMD` (see note\*): A command, run once at startup, whose stdout is used
   as the API key. Use this *instead of* `SEQ_API_KEY` to keep the key out of config
   files (see [Authentication](#authentication) below). `SEQ_API_KEY` takes precedence
   if both are set.
 - `SEQ_REDACTION_ENABLED` (optional): Set to `false` to disable PII redaction (defaults to enabled)
 
-\* Either `SEQ_API_KEY` or `SEQ_API_KEY_CMD` — Seq's HTTP API authenticates with an
-API key.
+\* Provide the API key via either `SEQ_API_KEY` or `SEQ_API_KEY_CMD`. A key is
+required for Seq instances that enforce authentication; if neither is set the server
+logs a warning and starts anyway (so it still works against an unauthenticated Seq).
 
 ## Authentication
 

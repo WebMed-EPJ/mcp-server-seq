@@ -65,7 +65,9 @@ export function resolveApiKey(env: ApiKeyEnv, run: CommandRunner = defaultRunner
     } catch (error) {
       // Surface the command (operator-provided config, e.g. an `op://` ref), not
       // its captured output, so a leaked secret can't end up in logs via the error.
-      throw new Error(`SEQ_API_KEY_CMD failed: ${(error as Error).message}`);
+      // Guard against non-Error throws (a custom runner could throw anything).
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(`SEQ_API_KEY_CMD failed: ${reason}`);
     }
     const key = output.trim();
     if (!key) {

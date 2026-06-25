@@ -22437,7 +22437,8 @@ function resolveApiKey(env, run = defaultRunner) {
     try {
       output = run(command);
     } catch (error) {
-      throw new Error(`SEQ_API_KEY_CMD failed: ${error.message}`);
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(`SEQ_API_KEY_CMD failed: ${reason}`);
     }
     const key = output.trim();
     if (!key) {
