@@ -12,13 +12,16 @@ compatibility: Requires the mcp-server-seq MCP server. Install with: claude mcp 
 
 # Seq Operations
 
-You have three tools from the `seq` MCP server:
+You have four tools from the `seq` MCP server:
 
 | Tool | Purpose |
 |------|---------|
 | `seq:get_alert_state` | Current state of all configured alerts (firing / ok / suppressed) |
 | `seq:get_signals` | List saved named filters — call this early to discover available signal IDs |
 | `seq:get_events` | Query structured log events with filters, time ranges, and pagination |
+| `seq:sql_query` | Run SQL-style aggregations (count, sum, mean, percentile, group by, time-slicing) — use instead of `get_events` for rollups |
+
+**Reach for `sql_query`, not `get_events`, whenever the answer is a number or a breakdown** — "how many errors", "which service is worst", "p95 latency over time". `get_events` returns raw rows you'd have to count by hand (and large result sets get truncated); `sql_query` computes the aggregate server-side.
 
 ## Setup (for users installing this skill)
 
@@ -39,6 +42,11 @@ Follow this sequence — don't jump straight to events without first knowing wha
 Always start here:
 1. `seq:get_alert_state` → any currently firing alerts?
 2. `seq:get_signals` → what named filters exist? Note their IDs — they're your shortcuts.
+
+**Scoping to a customer / office (WebMed prod).** Each customer (legekontor / office) is a distinct tenant identified by its unique name in the **`Environment`** property on every event. In production, each one has a saved signal named **`WebMed - "{Name}"`** (e.g. `WebMed - "Storgata Legesenter"`). So when the user names a customer:
+- Call `get_signals` and match the title `WebMed - "{Name}"`, then pass that signal `id` to `get_events`/`sql_query` — this is the reliable way to scope, since it encodes exactly how that tenant is filtered.
+- Or filter directly on the property: `filter: Environment = '{Name}'`.
+- Don't have the exact name? `get_signals` lists every `WebMed - "…"` title, so you can confirm spelling/casing before querying.
 
 ### Step 2 — Scope
 Pick a time range based on what you know:
@@ -72,10 +80,24 @@ Use `render: true` to get human-readable messages instead of raw templates.
 
 Use `after: <lastEventId>` to paginate if results are truncated.
 
-### Step 4 — Pattern
+### Step 4 — Quantify
+Once you've seen the raw events, switch to `sql_query` to measure the shape of the problem instead of eyeballing rows:
+```
+-- Which services are erroring, worst first?
+select Application, count(*) from stream where @Level in ['Error','Fatal'] group by Application order by count(*) desc
+
+-- Is it spiking? Errors per 5-minute slice
+select count(*) from stream where @Level = 'Error' group by time(5m)
+
+-- Latency tail on the suspect endpoint
+select percentile(Elapsed, 95) from stream where RequestPath like '/api/checkout%' group by time(1m)
+```
+Scope the same way as `get_events` — pass a `signal`, a `range`, or explicit `fromDateUtc`/`toDateUtc`.
+
+### Step 5 — Pattern
 Before concluding, ask:
 - Is this error new or pre-existing?
-- Is frequency increasing, stable, or spiking?
+- Is frequency increasing, stable, or spiking? (the `group by time(...)` query above answers this directly)
 - Is it isolated to one service or spreading?
 - Does timing correlate with a deployment or traffic change?
 - Is there a more severe concurrent issue in a different service?
@@ -98,11 +120,30 @@ StatusCode >= 500
 RequestPath like '/api/checkout%'
 Application = 'my-service'
 UserId = 'user-123'
+Environment = 'Storgata Legesenter'   # customer/office tenant (prod signal: WebMed - "Storgata Legesenter")
 
 # Combining
 @Level = 'Error' and Application = 'payments' and StatusCode >= 500
 
 # Time range shortcuts: 1m, 15m, 30m, 1h, 2h, 6h, 12h, 1d, 7d, 14d, 30d
+```
+
+The same filter expressions work as the `where` clause of a `sql_query`.
+
+### Aggregations (`sql_query`)
+
+```sql
+-- Count by group
+select Application, count(*) from stream where @Level = 'Error' group by Application order by count(*) desc
+
+-- Time series (one row per slice): days (d), hours (h), minutes (m), seconds (s), ms
+select count(*) from stream group by time(5m)
+
+-- Distinct / sum / mean / percentile
+select count(distinct UserId) from stream where StatusCode >= 500
+select percentile(Elapsed, 95), mean(Elapsed) from stream where RequestPath like '/api/%' group by RequestPath
+
+-- Always include the grouped column in the select, and add `limit` to bound large rowsets.
 ```
 
 ---
@@ -161,3 +202,12 @@ Keep it actionable — the person reading this may be mid-incident. Lead with wh
 **Performance investigation**
 → `filter: ResponseTime > 5000` (adjust threshold to context)
 → Look for timeout patterns: `@Message like '%timeout%' or @Exception like '%TimeoutException%'`
+
+**Single customer / office reported a problem**
+→ Find their signal via `get_signals` (title `WebMed - "{Name}"`) and scope with its `id`, or filter `Environment = '{Name}'`
+→ Then quantify: `sql_query` → `select count(*) from stream where @Level = 'Error' and Environment = '{Name}' group by time(5m)`
+→ Compare against the fleet — is only this office affected, or is it a broader incident?
+
+**Which customers are affected? (cross-tenant triage)**
+→ `sql_query` → `select Environment, count(*) from stream where @Level in ['Error','Fatal'] group by Environment order by count(*) desc`
+→ Surfaces the worst-hit offices in one call instead of querying signals one by one
