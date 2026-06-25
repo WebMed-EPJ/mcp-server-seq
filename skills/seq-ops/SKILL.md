@@ -19,9 +19,9 @@ You have four tools from the `seq` MCP server:
 | `seq:get_alert_state` | Current state of all configured alerts (firing / ok / suppressed) |
 | `seq:get_signals` | List saved named filters — call this early to discover available signal IDs |
 | `seq:get_events` | Query structured log events with filters, time ranges, and pagination |
-| `seq:sql_query` | Run SQL-style aggregations (count, sum, mean, percentile, group by, time-slicing) — use instead of `get_events` for rollups |
+| `seq:sql_query` | Run SQL-style aggregations (count, sum, mean, percentile, group by, time-slicing) — use instead of `seq:get_events` for rollups |
 
-**Reach for `sql_query`, not `get_events`, whenever the answer is a number or a breakdown** — "how many errors", "which service is worst", "p95 latency over time". `get_events` returns raw rows you'd have to count by hand (and large result sets get truncated); `sql_query` computes the aggregate server-side.
+**Reach for `seq:sql_query`, not `seq:get_events`, whenever the answer is a number or a breakdown** — "how many errors", "which service is worst", "p95 latency over time". `seq:get_events` returns raw rows you'd have to count by hand (and large result sets get truncated); `seq:sql_query` computes the aggregate server-side.
 
 ## Setup (for users installing this skill)
 
@@ -49,7 +49,7 @@ Always start here:
 > `Environment = 'hortenkomls'`    ⇄ signal `WebMed - Horten kommunale legesenter`
 
 So when the user names a customer, resolve the slug rather than constructing it:
-- **Preferred:** call `get_signals`, match the title by its `WebMed -` prefix plus the display name (match loosely — spacing/casing vary), and pass that signal `id` to `get_events`/`sql_query`. The signal encodes the exact tenant filter, so you never touch the slug.
+- **Preferred:** call `seq:get_signals`, match the title by its `WebMed -` prefix plus the display name (match loosely — spacing/casing vary), and pass that signal `id` to `seq:get_events`/`seq:sql_query`. The signal encodes the exact tenant filter, so you never touch the slug.
 - **Name ⇄ slug mapping lives in Lime CRM** — look it up there (the Lime MCP connector exposes the office records) when you have a name but not the slug, or need to turn an `Environment` value from a query back into a real customer name.
 - Only after you've confirmed the slug from one of the above, filter directly: `filter: Environment = '{slug}'` (e.g. `Environment = 'hortenkomls'`).
 
@@ -86,8 +86,8 @@ Use `render: true` to get human-readable messages instead of raw templates.
 Use `after: <lastEventId>` to paginate if results are truncated.
 
 ### Step 4 — Quantify
-Once you've seen the raw events, switch to `sql_query` to measure the shape of the problem instead of eyeballing rows:
-```
+Once you've seen the raw events, switch to `seq:sql_query` to measure the shape of the problem instead of eyeballing rows:
+```sql
 -- Which services are erroring, worst first?
 select Application, count(*) from stream where @Level in ['Error','Fatal'] group by Application order by count(*) desc
 
@@ -97,7 +97,7 @@ select count(*) from stream where @Level = 'Error' group by time(5m)
 -- Latency tail on the suspect endpoint
 select percentile(Elapsed, 95) from stream where RequestPath like '/api/checkout%' group by time(1m)
 ```
-Scope the same way as `get_events` — pass a `signal`, a `range`, or explicit `fromDateUtc`/`toDateUtc`.
+Scope the same way as `seq:get_events` — pass a `signal`, a `range`, or explicit `fromDateUtc`/`toDateUtc`.
 
 ### Step 5 — Pattern
 Before concluding, ask:
@@ -125,7 +125,7 @@ StatusCode >= 500
 RequestPath like '/api/checkout%'
 Application = 'my-service'
 UserId = 'user-123'
-Environment = 'hortenkomls'   # tenant slug — opaque/abbreviated; resolve via get_signals or Lime CRM (signal: WebMed - Horten kommunale legesenter)
+Environment = 'hortenkomls'   # tenant slug — opaque/abbreviated; resolve via seq:get_signals or Lime CRM (signal: WebMed - Horten kommunale legesenter)
 
 # Combining
 @Level = 'Error' and Application = 'payments' and StatusCode >= 500
@@ -133,22 +133,23 @@ Environment = 'hortenkomls'   # tenant slug — opaque/abbreviated; resolve via 
 # Time range shortcuts: 1m, 15m, 30m, 1h, 2h, 6h, 12h, 1d, 7d, 14d, 30d
 ```
 
-The same filter expressions work as the `where` clause of a `sql_query`.
+The same filter expressions work as the `where` clause of a `seq:sql_query`.
 
-### Aggregations (`sql_query`)
+### Aggregations (`seq:sql_query`)
 
 ```sql
 -- Count by group
 select Application, count(*) from stream where @Level = 'Error' group by Application order by count(*) desc
 
 -- Time series (one row per slice): days (d), hours (h), minutes (m), seconds (s), ms
+-- A time() slice is implicit in the timeseries result, so it isn't selected.
 select count(*) from stream group by time(5m)
 
 -- Distinct / sum / mean / percentile
 select count(distinct UserId) from stream where StatusCode >= 500
 select percentile(Elapsed, 95), mean(Elapsed) from stream where RequestPath like '/api/%' group by RequestPath
 
--- Always include the grouped column in the select, and add `limit` to bound large rowsets.
+-- Select any grouped property (e.g. Application); add `limit` to bound large rowsets.
 ```
 
 ---
@@ -191,11 +192,11 @@ Keep it actionable — the person reading this may be mid-incident. Lead with wh
 ## Common Scenarios
 
 **Morning health check**
-→ `get_alert_state` + `get_events` with `range: "8h"`, `filter: @Level in ['Error', 'Fatal']`
+→ `seq:get_alert_state` + `seq:get_events` with `range: "8h"`, `filter: @Level in ['Error', 'Fatal']`
 → Note any services with unusually high error counts compared to normal
 
 **Active incident**
-→ Start with `get_alert_state` to confirm scope, then zoom into the affected service
+→ Start with `seq:get_alert_state` to confirm scope, then zoom into the affected service
 → Look for the first occurrence of the error — when did it start?
 → Check if it correlates with a deployment or config change
 
@@ -209,11 +210,11 @@ Keep it actionable — the person reading this may be mid-incident. Lead with wh
 → Look for timeout patterns: `@Message like '%timeout%' or @Exception like '%TimeoutException%'`
 
 **Single customer / office reported a problem**
-→ Resolve the tenant first: find their signal via `get_signals` (title `WebMed - {Name}`) and scope with its `id`, or get the slug from Lime CRM — don't guess it
-→ Then quantify: `sql_query` → `select count(*) from stream where @Level = 'Error' and Environment = 'hortenkomls' group by time(5m)`
+→ Resolve the tenant first: find their signal via `seq:get_signals` (title `WebMed - {Name}`) and scope with its `id`, or get the slug from Lime CRM — don't guess it
+→ Then quantify: `seq:sql_query` → `select count(*) from stream where @Level = 'Error' and Environment = 'hortenkomls' group by time(5m)`
 → Compare against the fleet — is only this office affected, or is it a broader incident?
 
 **Which customers are affected? (cross-tenant triage)**
-→ `sql_query` → `select Environment, count(*) from stream where @Level in ['Error','Fatal'] group by Environment order by count(*) desc`
+→ `seq:sql_query` → `select Environment, count(*) from stream where @Level in ['Error','Fatal'] group by Environment order by count(*) desc`
 → Surfaces the worst-hit offices in one call instead of querying signals one by one
 → The result lists raw `Environment` slugs — map them back to customer names via Lime CRM before reporting
