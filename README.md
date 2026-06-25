@@ -54,6 +54,9 @@ The server reads the following environment variables:
   as the API key. Use this *instead of* `SEQ_API_KEY` to keep the key out of config
   files (see [Authentication](#authentication) below). `SEQ_API_KEY` takes precedence
   if both are set.
+- `SEQ_API_KEY_CMD_TIMEOUT_MS` (optional): Timeout for `SEQ_API_KEY_CMD`, in
+  milliseconds (default `30000`). Bounds startup so a hanging command (e.g. an
+  unanswered biometric/SSO prompt) can't block the server indefinitely.
 - `SEQ_REDACTION_ENABLED` (optional): Set to `false` to disable PII redaction (defaults to enabled)
 
 \* Provide the API key via either `SEQ_API_KEY` or `SEQ_API_KEY_CMD`. A key is
@@ -98,7 +101,10 @@ SEQ_API_KEY_CMD="secret-tool lookup service seq-api-key"
 SEQ_API_KEY_CMD="aws secretsmanager get-secret-value --secret-id seq --query SecretString --output text"
 ```
 
-If the command fails or prints nothing, the server logs a clear error and exits.
+If the command fails, times out, or prints nothing, the server logs a clear error
+and exits. The error reports only a safe reason (exit code, signal, or timeout) —
+never the command's output or stderr — to avoid leaking secrets into logs; run the
+command yourself to debug. Tune the timeout with `SEQ_API_KEY_CMD_TIMEOUT_MS`.
 
 > **Why not OAuth?** OAuth would require Seq to accept externally-issued tokens on
 > its API, which it does not. Per-user API keys with least-privilege permissions

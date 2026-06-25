@@ -22423,11 +22423,25 @@ function resolveDataRange(input, now) {
 
 // src/apikey.ts
 import { execSync } from "node:child_process";
+var DEFAULT_CMD_TIMEOUT_MS = 3e4;
+function commandTimeoutMs(env) {
+  const raw = env.SEQ_API_KEY_CMD_TIMEOUT_MS;
+  if (raw === void 0 || raw.trim() === "") return DEFAULT_CMD_TIMEOUT_MS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_CMD_TIMEOUT_MS;
+}
 var defaultRunner = (command) => execSync(command, {
   encoding: "utf8",
-  // Discard stdin; capture stdout (the key); let stderr surface for diagnostics.
-  stdio: ["ignore", "pipe", "inherit"]
+  stdio: ["ignore", "pipe", "pipe"],
+  timeout: commandTimeoutMs(process.env)
 });
+function failureReason(error, timeoutMs) {
+  const e = error ?? {};
+  if (e.killed || e.signal === "SIGTERM" || e.code === "ETIMEDOUT") return `timed out after ${timeoutMs}ms`;
+  if (typeof e.status === "number") return `exited with code ${e.status}`;
+  if (e.signal) return `was terminated by signal ${e.signal}`;
+  return "could not be run";
+}
 function resolveApiKey(env, run = defaultRunner) {
   const direct = env.SEQ_API_KEY?.trim();
   if (direct) return direct;
@@ -22437,8 +22451,9 @@ function resolveApiKey(env, run = defaultRunner) {
     try {
       output = run(command);
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      throw new Error(`SEQ_API_KEY_CMD failed: ${reason}`);
+      throw new Error(
+        `SEQ_API_KEY_CMD ${failureReason(error, commandTimeoutMs(env))}. Run the configured command manually to see its error output.`
+      );
     }
     const key = output.trim();
     if (!key) {

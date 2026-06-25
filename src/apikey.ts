@@ -25,6 +25,8 @@ export interface ApiKeyEnv {
   SEQ_API_KEY?: string;
   /** Shell command whose stdout is the API key, run once at startup. */
   SEQ_API_KEY_CMD?: string;
+  /** Timeout in ms for SEQ_API_KEY_CMD (positive integer; default 30000). */
+  SEQ_API_KEY_CMD_TIMEOUT_MS?: string;
   // Index signature so `process.env` (NodeJS.ProcessEnv) is assignable.
   [key: string]: string | undefined;
 }
@@ -32,12 +34,66 @@ export interface ApiKeyEnv {
 /** Runs a shell command and returns its stdout. Injected for testability. */
 export type CommandRunner = (command: string) => string;
 
+/** Default timeout (ms) for SEQ_API_KEY_CMD when SEQ_API_KEY_CMD_TIMEOUT_MS is unset or invalid. */
+const DEFAULT_CMD_TIMEOUT_MS = 30_000;
+
+/**
+ * Parse the configured command timeout, falling back to the default for an
+ * unset, non-numeric, or non-positive value. Generous by default so an
+ * interactive unlock (e.g. a 1Password biometric prompt) has time to complete.
+ *
+ * @param env - Environment variables
+ * @returns Timeout in milliseconds
+ */
+function commandTimeoutMs(env: ApiKeyEnv): number {
+  const raw = env.SEQ_API_KEY_CMD_TIMEOUT_MS;
+  if (raw === undefined || raw.trim() === '') return DEFAULT_CMD_TIMEOUT_MS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_CMD_TIMEOUT_MS;
+}
+
+/**
+ * Default {@link CommandRunner}: runs the command via the shell and returns its
+ * stdout as a UTF-8 string.
+ *
+ * Two hardening choices:
+ * - stderr is captured (`pipe`), not inherited, so a failing secrets command
+ *   can't print sensitive output straight into the MCP server's logs.
+ * - the command is bounded by a timeout (see {@link commandTimeoutMs}) so a
+ *   hanging tool — e.g. an unanswered biometric/SSO prompt — can't block
+ *   startup indefinitely.
+ *
+ * The command is trusted operator configuration (like git's `credential.helper`
+ * or AWS's `credential_process`), so it is intentionally run via the shell to
+ * support pipelines and expansions.
+ *
+ * @param command - The shell command to execute
+ * @returns The command's stdout
+ */
 const defaultRunner: CommandRunner = (command) =>
   execSync(command, {
     encoding: 'utf8',
-    // Discard stdin; capture stdout (the key); let stderr surface for diagnostics.
-    stdio: ['ignore', 'pipe', 'inherit'],
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: commandTimeoutMs(process.env),
   });
+
+/**
+ * Build a bounded, non-sensitive failure reason from a thrown command error.
+ *
+ * Never echoes `error.message` or captured stderr — either can carry the
+ * command text or secret output, which may end up in logs the MCP client keeps.
+ *
+ * @param error - The value thrown by the command runner
+ * @param timeoutMs - The configured timeout, for the timeout message
+ * @returns A short, safe description of why the command failed
+ */
+function failureReason(error: unknown, timeoutMs: number): string {
+  const e = (error ?? {}) as { status?: number; signal?: string | null; killed?: boolean; code?: string };
+  if (e.killed || e.signal === 'SIGTERM' || e.code === 'ETIMEDOUT') return `timed out after ${timeoutMs}ms`;
+  if (typeof e.status === 'number') return `exited with code ${e.status}`;
+  if (e.signal) return `was terminated by signal ${e.signal}`;
+  return 'could not be run';
+}
 
 /**
  * Resolve the Seq API key from the environment.
@@ -51,7 +107,7 @@ const defaultRunner: CommandRunner = (command) =>
  * @param env - Environment variables (typically `process.env`)
  * @param run - Command executor (defaults to a real `execSync`; override in tests)
  * @returns The resolved API key, or '' if neither variable is configured
- * @throws If `SEQ_API_KEY_CMD` is set but the command fails or yields no output
+ * @throws If `SEQ_API_KEY_CMD` is set but the command fails, times out, or yields no output
  */
 export function resolveApiKey(env: ApiKeyEnv, run: CommandRunner = defaultRunner): string {
   const direct = env.SEQ_API_KEY?.trim();
@@ -63,11 +119,11 @@ export function resolveApiKey(env: ApiKeyEnv, run: CommandRunner = defaultRunner
     try {
       output = run(command);
     } catch (error) {
-      // Surface the command (operator-provided config, e.g. an `op://` ref), not
-      // its captured output, so a leaked secret can't end up in logs via the error.
-      // Guard against non-Error throws (a custom runner could throw anything).
-      const reason = error instanceof Error ? error.message : String(error);
-      throw new Error(`SEQ_API_KEY_CMD failed: ${reason}`);
+      // Report only a bounded, non-sensitive reason — see failureReason().
+      throw new Error(
+        `SEQ_API_KEY_CMD ${failureReason(error, commandTimeoutMs(env))}. ` +
+        `Run the configured command manually to see its error output.`
+      );
     }
     const key = output.trim();
     if (!key) {

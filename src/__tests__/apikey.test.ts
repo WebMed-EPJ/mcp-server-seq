@@ -44,10 +44,33 @@ describe('resolveApiKey', () => {
     expect(resolveApiKey({})).toBe('');
   });
 
-  it('throws a clear error when the command fails', () => {
-    const run = spyRunner(() => { throw new Error('op: not signed in'); });
-    expect(() => resolveApiKey({ SEQ_API_KEY_CMD: 'op read ...' }, run))
-      .toThrow(/SEQ_API_KEY_CMD failed: op: not signed in/);
+  it('throws a sanitized error (no command text or stderr) when the command fails', () => {
+    const run = spyRunner(() => {
+      const e = new Error('op: not signed in — super-secret-token') as Error & { status?: number };
+      e.status = 1;
+      throw e;
+    });
+    try {
+      resolveApiKey({ SEQ_API_KEY_CMD: 'op read op://Employee/Seq/password' }, run);
+      throw new Error('expected resolveApiKey to throw');
+    } catch (err) {
+      const msg = (err as Error).message;
+      expect(msg).toMatch(/SEQ_API_KEY_CMD exited with code 1/);
+      // Must not leak the command text or the command's stderr/message.
+      expect(msg).not.toContain('super-secret-token');
+      expect(msg).not.toContain('op read');
+    }
+  });
+
+  it('reports a timeout when the command is killed', () => {
+    const run = spyRunner(() => {
+      const e = new Error('killed') as Error & { killed?: boolean; signal?: string };
+      e.killed = true;
+      e.signal = 'SIGTERM';
+      throw e;
+    });
+    expect(() => resolveApiKey({ SEQ_API_KEY_CMD: 'sleep 999', SEQ_API_KEY_CMD_TIMEOUT_MS: '5000' }, run))
+      .toThrow(/timed out after 5000ms/);
   });
 
   it('throws when the command produces no output', () => {
