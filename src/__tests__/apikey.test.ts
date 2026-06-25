@@ -30,8 +30,8 @@ describe('resolveApiKey', () => {
 
   it('runs SEQ_API_KEY_CMD and uses its trimmed stdout', () => {
     const run = spyRunner(() => 'key-from-1password\n');
-    expect(resolveApiKey({ SEQ_API_KEY_CMD: 'op read op://Private/Seq/api-key' }, run)).toBe('key-from-1password');
-    expect(run.calls).toEqual(['op read op://Private/Seq/api-key']);
+    expect(resolveApiKey({ SEQ_API_KEY_CMD: 'op read op://Employee/Seq/password' }, run)).toBe('key-from-1password');
+    expect(run.calls).toEqual(['op read op://Employee/Seq/password']);
   });
 
   it('falls back to SEQ_API_KEY_CMD when SEQ_API_KEY is empty/whitespace', () => {

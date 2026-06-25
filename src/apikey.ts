@@ -12,7 +12,7 @@
  * command that fetches the key at startup from a secrets manager or OS keychain.
  *
  * 1Password example (uses the local desktop app for unlock, nothing on disk):
- *   SEQ_API_KEY_CMD="op read op://Private/Seq/api-key"
+ *   SEQ_API_KEY_CMD="op read op://Employee/Seq/password"
  * Other examples:
  *   SEQ_API_KEY_CMD="security find-generic-password -s seq-api-key -w"   # macOS Keychain
  *   SEQ_API_KEY_CMD="secret-tool lookup service seq-api-key"             # libsecret / GNOME Keyring

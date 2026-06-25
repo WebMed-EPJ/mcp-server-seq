@@ -77,11 +77,11 @@ and never lives in a file. Store the key in a 1Password item, then reference it:
 ```bash
 claude mcp add --transport stdio \
   --env SEQ_BASE_URL=http://localhost:5341 \
-  --env SEQ_API_KEY_CMD="op read op://Private/Seq/api-key" \
+  --env SEQ_API_KEY_CMD="op read op://Employee/Seq/password" \
   seq -- npx -y mcp-seq
 ```
 
-(`op://Private/Seq/api-key` = `op://<vault>/<item>/<field>` — adjust to your vault.)
+(`op://Employee/Seq/password` = `op://<vault>/<item>/<field>` — adjust to your vault.)
 
 ### Other secrets sources
 
