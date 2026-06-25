@@ -5,15 +5,26 @@ import { z } from "zod";
 import 'dotenv/config';
 import { redactDeep } from "./redact.js";
 import { resolveDataRange } from "./timerange.js";
+import { resolveApiKey } from "./apikey.js";
 
 // Configuration and constants
 const SEQ_BASE_URL = process.env.SEQ_BASE_URL || 'http://localhost:8080';
-const SEQ_API_KEY = process.env.SEQ_API_KEY || '';
 const MAX_EVENTS = 50;
 const CHARACTER_LIMIT = 25_000;
 
+// Resolve the API key from SEQ_API_KEY, or from SEQ_API_KEY_CMD (a command that
+// fetches it at startup from a secrets manager / OS keychain — e.g. 1Password's
+// `op read op://...`), so no plaintext key need live in MCP config files.
+let SEQ_API_KEY = '';
+try {
+  SEQ_API_KEY = resolveApiKey(process.env);
+} catch (error) {
+  console.error(`Failed to resolve Seq API key: ${(error as Error).message}`);
+  process.exit(1);
+}
+
 if (!SEQ_API_KEY) {
-  console.error('Warning: SEQ_API_KEY is not set. Some Seq instances require authentication.');
+  console.error('Warning: no Seq API key configured (set SEQ_API_KEY or SEQ_API_KEY_CMD). Some Seq instances require authentication.');
 }
 
 // Types for Seq API responses

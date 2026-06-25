@@ -22421,13 +22421,46 @@ function resolveDataRange(input, now) {
   };
 }
 
+// src/apikey.ts
+import { execSync } from "node:child_process";
+var defaultRunner = (command) => execSync(command, {
+  encoding: "utf8",
+  // Discard stdin; capture stdout (the key); let stderr surface for diagnostics.
+  stdio: ["ignore", "pipe", "inherit"]
+});
+function resolveApiKey(env, run = defaultRunner) {
+  const direct = env.SEQ_API_KEY?.trim();
+  if (direct) return direct;
+  const command = env.SEQ_API_KEY_CMD?.trim();
+  if (command) {
+    let output;
+    try {
+      output = run(command);
+    } catch (error) {
+      throw new Error(`SEQ_API_KEY_CMD failed: ${error.message}`);
+    }
+    const key = output.trim();
+    if (!key) {
+      throw new Error("SEQ_API_KEY_CMD produced no output; expected the API key on stdout.");
+    }
+    return key;
+  }
+  return "";
+}
+
 // src/seq-server.ts
 var SEQ_BASE_URL = process.env.SEQ_BASE_URL || "http://localhost:8080";
-var SEQ_API_KEY = process.env.SEQ_API_KEY || "";
 var MAX_EVENTS = 50;
 var CHARACTER_LIMIT = 25e3;
+var SEQ_API_KEY = "";
+try {
+  SEQ_API_KEY = resolveApiKey(process.env);
+} catch (error) {
+  console.error(`Failed to resolve Seq API key: ${error.message}`);
+  process.exit(1);
+}
 if (!SEQ_API_KEY) {
-  console.error("Warning: SEQ_API_KEY is not set. Some Seq instances require authentication.");
+  console.error("Warning: no Seq API key configured (set SEQ_API_KEY or SEQ_API_KEY_CMD). Some Seq instances require authentication.");
 }
 var server = new McpServer({
   name: "seq-mcp-server",
