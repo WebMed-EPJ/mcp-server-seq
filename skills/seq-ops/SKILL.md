@@ -43,14 +43,15 @@ Always start here:
 1. `seq:get_alert_state` → any currently firing alerts?
 2. `seq:get_signals` → what named filters exist? Note their IDs — they're your shortcuts.
 
-**Scoping to a customer / office (WebMed prod).** Each customer (legekontor / office) is a distinct tenant. Every event carries an **`Environment`** property whose value is the tenant's **lowercase slug** (e.g. `storoklinikken`). In production each tenant also has a saved signal titled **`WebMed - {Name}`** using the display name. The two differ in case — and the slug may drop spaces:
+**Scoping to a customer / office (WebMed prod).** Each customer (legekontor / office) is a distinct tenant. Every event carries an **`Environment`** property whose value is a short tenant **slug**. In production each tenant also has a saved signal titled **`WebMed - {Name}`** using the display name. **The slug is an assigned identifier — often an abbreviation — and is NOT derivable from the display name. Never guess it:**
 
-> Signal `WebMed - Storoklinikken`  ⇄  `Environment = 'storoklinikken'`
+> `Environment = 'storoklinikken'` ⇄ signal `WebMed - Storoklinikken`
+> `Environment = 'hortenkomls'`    ⇄ signal `WebMed - Horten kommunale legesenter`
 
-So when the user names a customer:
-- **Preferred:** call `get_signals`, match the title by its `WebMed -` prefix plus the name (match loosely — spacing/casing vary), and pass that signal `id` to `get_events`/`sql_query`. The signal encodes the exact tenant filter, so you never have to guess the slug.
-- **Direct filter:** `filter: Environment = '{slug}'` with the lowercased name, e.g. `Environment = 'storoklinikken'`.
-- Unsure of the slug or spelling? `get_signals` returns every `WebMed - …` title *and its filter* — confirm there before querying.
+So when the user names a customer, resolve the slug rather than constructing it:
+- **Preferred:** call `get_signals`, match the title by its `WebMed -` prefix plus the display name (match loosely — spacing/casing vary), and pass that signal `id` to `get_events`/`sql_query`. The signal encodes the exact tenant filter, so you never touch the slug.
+- **Name ⇄ slug mapping lives in Lime CRM** — look it up there (the Lime MCP connector exposes the office records) when you have a name but not the slug, or need to turn an `Environment` value from a query back into a real customer name.
+- Only after you've confirmed the slug from one of the above, filter directly: `filter: Environment = '{slug}'` (e.g. `Environment = 'hortenkomls'`).
 
 ### Step 2 — Scope
 Pick a time range based on what you know:
@@ -124,7 +125,7 @@ StatusCode >= 500
 RequestPath like '/api/checkout%'
 Application = 'my-service'
 UserId = 'user-123'
-Environment = 'storoklinikken'   # tenant slug — lowercase (prod signal: WebMed - Storoklinikken)
+Environment = 'hortenkomls'   # tenant slug — opaque/abbreviated; resolve via get_signals or Lime CRM (signal: WebMed - Horten kommunale legesenter)
 
 # Combining
 @Level = 'Error' and Application = 'payments' and StatusCode >= 500
@@ -208,10 +209,11 @@ Keep it actionable — the person reading this may be mid-incident. Lead with wh
 → Look for timeout patterns: `@Message like '%timeout%' or @Exception like '%TimeoutException%'`
 
 **Single customer / office reported a problem**
-→ Find their signal via `get_signals` (title `WebMed - {Name}`) and scope with its `id`, or filter on the lowercase slug `Environment = '{slug}'`
-→ Then quantify: `sql_query` → `select count(*) from stream where @Level = 'Error' and Environment = 'storoklinikken' group by time(5m)`
+→ Resolve the tenant first: find their signal via `get_signals` (title `WebMed - {Name}`) and scope with its `id`, or get the slug from Lime CRM — don't guess it
+→ Then quantify: `sql_query` → `select count(*) from stream where @Level = 'Error' and Environment = 'hortenkomls' group by time(5m)`
 → Compare against the fleet — is only this office affected, or is it a broader incident?
 
 **Which customers are affected? (cross-tenant triage)**
 → `sql_query` → `select Environment, count(*) from stream where @Level in ['Error','Fatal'] group by Environment order by count(*) desc`
 → Surfaces the worst-hit offices in one call instead of querying signals one by one
+→ The result lists raw `Environment` slugs — map them back to customer names via Lime CRM before reporting
