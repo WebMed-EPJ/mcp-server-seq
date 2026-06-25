@@ -22421,13 +22421,63 @@ function resolveDataRange(input, now) {
   };
 }
 
+// src/apikey.ts
+import { execSync } from "node:child_process";
+var DEFAULT_CMD_TIMEOUT_MS = 3e4;
+function commandTimeoutMs(env) {
+  const raw = env.SEQ_API_KEY_CMD_TIMEOUT_MS;
+  if (raw === void 0 || raw.trim() === "") return DEFAULT_CMD_TIMEOUT_MS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_CMD_TIMEOUT_MS;
+}
+var defaultRunner = (command, timeoutMs) => execSync(command, {
+  encoding: "utf8",
+  stdio: ["ignore", "pipe", "pipe"],
+  timeout: timeoutMs
+});
+function failureReason(error, timeoutMs) {
+  const e = error ?? {};
+  if (e.killed || e.signal === "SIGTERM" || e.code === "ETIMEDOUT") return `timed out after ${timeoutMs}ms`;
+  if (typeof e.status === "number") return `exited with code ${e.status}`;
+  if (e.signal) return `was terminated by signal ${e.signal}`;
+  return "could not be run";
+}
+function resolveApiKey(env, run = defaultRunner) {
+  const direct = env.SEQ_API_KEY?.trim();
+  if (direct) return direct;
+  const command = env.SEQ_API_KEY_CMD?.trim();
+  if (command) {
+    const timeoutMs = commandTimeoutMs(env);
+    let output;
+    try {
+      output = run(command, timeoutMs);
+    } catch (error) {
+      throw new Error(
+        `SEQ_API_KEY_CMD ${failureReason(error, timeoutMs)}. Run the configured command manually to see its error output.`
+      );
+    }
+    const key = output.trim();
+    if (!key) {
+      throw new Error("SEQ_API_KEY_CMD produced no output; expected the API key on stdout.");
+    }
+    return key;
+  }
+  return "";
+}
+
 // src/seq-server.ts
 var SEQ_BASE_URL = process.env.SEQ_BASE_URL || "http://localhost:8080";
-var SEQ_API_KEY = process.env.SEQ_API_KEY || "";
 var MAX_EVENTS = 50;
 var CHARACTER_LIMIT = 25e3;
+var SEQ_API_KEY = "";
+try {
+  SEQ_API_KEY = resolveApiKey(process.env);
+} catch (error) {
+  console.error(`Failed to resolve Seq API key: ${error.message}`);
+  process.exit(1);
+}
 if (!SEQ_API_KEY) {
-  console.error("Warning: SEQ_API_KEY is not set. Some Seq instances require authentication.");
+  console.error("Warning: no Seq API key configured (set SEQ_API_KEY or SEQ_API_KEY_CMD). Some Seq instances require authentication.");
 }
 var server = new McpServer({
   name: "seq-mcp-server",

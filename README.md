@@ -46,11 +46,71 @@ MCP Server for Seq's API endpoints for interacting with your logging and monitor
 
 ## Configuration
 
-The server requires the following environment variables:
+The server reads the following environment variables:
 
 - `SEQ_BASE_URL` (optional): Your Seq server URL (defaults to 'http://localhost:8080')
-- `SEQ_API_KEY` (required): Your Seq API key
+- `SEQ_API_KEY` (see note\*): Your Seq API key
+- `SEQ_API_KEY_CMD` (see note\*): A command, run once at startup, whose stdout is used
+  as the API key. Use this *instead of* `SEQ_API_KEY` to keep the key out of config
+  files (see [Authentication](#authentication) below). `SEQ_API_KEY` takes precedence
+  if both are set.
+- `SEQ_API_KEY_CMD_TIMEOUT_MS` (optional): Timeout for `SEQ_API_KEY_CMD`, in
+  milliseconds (default `30000`). Bounds startup so a hanging command (e.g. an
+  unanswered biometric/SSO prompt) can't block the server indefinitely.
 - `SEQ_REDACTION_ENABLED` (optional): Set to `false` to disable PII redaction (defaults to enabled)
+
+\* Provide the API key via either `SEQ_API_KEY` or `SEQ_API_KEY_CMD`. A key is
+required for Seq instances that enforce authentication; if neither is set the server
+logs a warning and starts anyway (so it still works against an unauthenticated Seq).
+
+## Authentication
+
+Seq's HTTP API authenticates with an **API key** (`X-Seq-ApiKey`). It does **not**
+accept OAuth2 / OpenID Connect bearer tokens for programmatic access — Seq's OIDC
+support is for interactive web-UI login only — so this server uses an API key. To
+avoid storing that key in plaintext inside `.mcp.json` / `claude_desktop_config.json`,
+set `SEQ_API_KEY_CMD` to a command that fetches it at startup from a secrets manager
+or OS keychain. The key is fetched once when the server starts and never written to disk.
+
+### 1Password
+
+With the [1Password CLI](https://developer.1password.com/docs/cli/) (`op`) and the
+desktop app's CLI integration enabled, the key is unlocked locally (e.g. via Touch ID)
+and never lives in a file. Store the key in a 1Password item, then reference it:
+
+```bash
+claude mcp add --transport stdio \
+  --env SEQ_BASE_URL=http://localhost:5341 \
+  --env SEQ_API_KEY_CMD="op read op://Employee/Seq/password" \
+  seq -- npx -y mcp-seq
+```
+
+(`op://Employee/Seq/password` = `op://<vault>/<item>/<field>` — adjust to your vault.)
+
+### Other secrets sources
+
+`SEQ_API_KEY_CMD` is just a shell command, so any tool that prints the secret to
+stdout works:
+
+```bash
+# macOS Keychain
+SEQ_API_KEY_CMD="security find-generic-password -s seq-api-key -w"
+# libsecret / GNOME Keyring
+SEQ_API_KEY_CMD="secret-tool lookup service seq-api-key"
+# AWS Secrets Manager
+SEQ_API_KEY_CMD="aws secretsmanager get-secret-value --secret-id seq --query SecretString --output text"
+```
+
+If the command fails, times out, or prints nothing, the server logs a clear error
+and exits. The error reports only a safe reason (exit code, signal, or timeout) —
+never the command's output or stderr — to avoid leaking secrets into logs; run the
+command yourself to debug. Tune the timeout with `SEQ_API_KEY_CMD_TIMEOUT_MS`.
+
+> **Why not OAuth?** OAuth would require Seq to accept externally-issued tokens on
+> its API, which it does not. Per-user API keys with least-privilege permissions
+> (created and rotated in Seq) combined with `SEQ_API_KEY_CMD` give you
+> traceability and easy revocation — important under GDPR / Personvern — without a
+> shared static secret in config files.
 
 ## Privacy / PII Redaction
 
