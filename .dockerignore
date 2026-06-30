@@ -1,0 +1,12 @@
+node_modules
+build
+dist-server
+dist-test
+.env
+.env.*
+!.env.example
+*.log
+.git
+.github
+skills
+prompts

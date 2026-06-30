@@ -3,13 +3,46 @@
 ## Build & Run Commands
 - Build: `npm run build` (tsc emit, then esbuild bundles a self-contained `build/seq-server.js`)
 - Bundle only: `npm run bundle` (esbuild → single-file `build/seq-server.js`)
-- Start: `npm run start`
+- Start (stdio): `npm run start`
+- Start (remote HTTP): `npm run start:remote` (tsc → `dist-server/`, then `node dist-server/remote.js`)
 - Development: `npm run dev` (watch mode)
 - Test (all unit tests): `npm test` (Jest)
 - Run specific test: `npx jest src/__tests__/your-test-file.test.ts`
 - Manual smoke test against a live Seq instance: `npm run test-script`
 
 Requires Node.js >= 20 (see `engines` in package.json).
+
+## Two entry points (stdio + remote HTTP)
+- **`src/seq-server.ts`** — the **stdio** entry point. Thin: reads env, calls `createSeqServer()`,
+  connects a `StdioServerTransport`. This is what gets esbuild-bundled into `build/seq-server.js`
+  and run by the `claude-plugins` `seq-ops` plugin. Stays **dependency-free** (no express/msal).
+- **`src/server.ts`** — `createSeqServer()`, the shared server factory: registers all tools/resources
+  (`get_signals`, `get_events`, `get_alert_state`, `sql_query`, `signals` resource) and reads the
+  `SEQ_BASE_URL`/`SEQ_API_KEY` upstream config. Both entry points use it, so they expose an identical
+  tool surface and the same `redactDeep` PII guarantee.
+- **`src/remote.ts`** — the **remote HTTP** entry point (Docker). Serves the same tools over an
+  OAuth-protected **Streamable HTTP** `/mcp` endpoint (Express). Authorization is a full OAuth 2.1
+  flow (DCR + PKCE) federated to **Microsoft Entra** — the same model as the WebMed Lime/m365
+  connectors. Sign-in only AUTHENTICATES the caller; `SEQ_API_KEY` stays global + server-side. Ports
+  the OAuth machinery verbatim: `src/remote/provider.ts` (`EntraOAuthProvider`), `src/remote/stores.ts`
+  (in-memory token store; single-instance only), `src/remote-config.ts` (`loadRemoteConfig`), and a
+  stderr-only `src/logger.ts`. Fails closed without `REMOTE_PUBLIC_URL`/`TENANT_ID`/`CLIENT_ID`/
+  `CLIENT_SECRET`/`SEQ_API_KEY`. Endpoints: `/healthz` (unauth), OAuth metadata/`/authorize`/`/token`/
+  `/revoke`/`/register`, `/callback`, `/mcp` (bearer; POST only, GET/DELETE → 405).
+- **Dependency split:** `express` + `@azure/msal-node` are runtime deps used **only** by `remote.ts`.
+  Because `seq-server.ts` → `server.ts` never imports them, the esbuild stdio bundle stays free of
+  them. The Docker image compiles `src/` with `tsc` (`build:server`) and ships prod `node_modules`
+  (`npm ci --omit=dev`) — it is NOT esbuild-bundled.
+- **zod must be `^3.25`** (not `^3.24`): the SDK (`@modelcontextprotocol/sdk` `^1.29`) needs
+  `zod ^3.25 || ^4.0`. With an older zod two copies install (project 3.x + the SDK's 4.x), and the
+  `ZodRawShapeCompat` types in `server.tool(...)` blow up `tsc` (TS2589, multi-minute typecheck).
+  Keep a single deduped zod 3.25.x (`npm dedupe` if the lock regresses).
+
+## Docker (remote HTTP server)
+`Dockerfile` builds the remote connector only (multi-stage: `tsc` → slim prod runtime, `node
+dist-server/remote.js`, `HEALTHCHECK` on `/healthz`, default `PORT=8790`). `.dockerignore` excludes
+`node_modules`/`build`/`dist-*`/`.env`. See `README.md` and `.env.example` for the env vars. The
+stdio bundle/plugin path is unaffected.
 
 ## Committed bundle (`build/seq-server.js`)
 `build/` is git-ignored **except** `build/seq-server.js`, which is a committed, self-contained
