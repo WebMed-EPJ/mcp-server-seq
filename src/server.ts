@@ -38,9 +38,9 @@ interface SeqEvent {
 async function makeSeqRequest<T>(endpoint: string, params: Record<string, string> = {}): Promise<T> {
   const url = new URL(`${SEQ_BASE_URL}${endpoint}`);
 
-  if (SEQ_API_KEY) {
-    url.searchParams.append('apiKey', SEQ_API_KEY);
-  }
+  // The API key goes in the X-Seq-ApiKey header only (set below), never in the
+  // query string: query-string secrets leak into intermediary/proxy access logs
+  // and metrics. The header authenticates Seq API calls on its own.
 
   Object.entries(params).forEach(([key, value]) => {
     if (value !== undefined && value !== null) {

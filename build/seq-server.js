@@ -36613,9 +36613,6 @@ var MAX_EVENTS = 50;
 var CHARACTER_LIMIT = 25e3;
 async function makeSeqRequest(endpoint, params = {}) {
   const url = new URL(`${SEQ_BASE_URL}${endpoint}`);
-  if (SEQ_API_KEY) {
-    url.searchParams.append("apiKey", SEQ_API_KEY);
-  }
   Object.entries(params).forEach(([key, value]) => {
     if (value !== void 0 && value !== null) {
       url.searchParams.append(key, value);

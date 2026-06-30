@@ -54,6 +54,15 @@ async function main(): Promise<void> {
       "Missing required environment variable SEQ_API_KEY. The remote connector refuses to start without it (fail-closed).",
     );
   }
+  // server.ts defaults SEQ_BASE_URL to http://localhost:8080 for the local stdio
+  // dev path, but a hosted remote server silently targeting localhost is a
+  // misconfiguration (it contradicts the docs/.env.example). Require it
+  // explicitly in remote mode rather than inheriting that default.
+  if (!process.env.SEQ_BASE_URL?.trim()) {
+    throw new Error(
+      "Missing required environment variable SEQ_BASE_URL. The remote connector refuses to start without it (fail-closed) — it must point at the Seq server explicitly (no localhost default in remote mode).",
+    );
+  }
 
   const port = Number(process.env.PORT?.trim() || "8790");
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -118,8 +127,13 @@ async function main(): Promise<void> {
   // Entra redirects the browser here after sign-in.
   app.get("/callback", (req, res) => {
     provider.handleEntraCallback(req.query as Record<string, unknown>, res).catch((err) => {
+      // Log the detail (PII-safe via errorFields) but never reflect the raw
+      // exception message back to the browser — it can carry internal/OAuth
+      // detail. The user gets a generic message.
       logger.error("Entra callback failed", errorFields(err));
-      res.status(500).send(`Callback error: ${(err as Error).message}`);
+      if (!res.headersSent) {
+        res.status(500).send("Sign-in callback failed. Please try signing in again.");
+      }
     });
   });
 
