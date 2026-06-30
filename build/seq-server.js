@@ -36611,6 +36611,10 @@ var SEQ_BASE_URL = process.env.SEQ_BASE_URL || "http://localhost:8080";
 var SEQ_API_KEY = process.env.SEQ_API_KEY || "";
 var MAX_EVENTS = 50;
 var CHARACTER_LIMIT = 25e3;
+var SEQ_REQUEST_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.SEQ_REQUEST_TIMEOUT_MS ?? "30000");
+  return Number.isFinite(raw) && raw > 0 ? raw : 3e4;
+})();
 async function makeSeqRequest(endpoint, params = {}) {
   const url = new URL(`${SEQ_BASE_URL}${endpoint}`);
   Object.entries(params).forEach(([key, value]) => {
@@ -36624,7 +36628,20 @@ async function makeSeqRequest(endpoint, params = {}) {
   if (SEQ_API_KEY) {
     headers["X-Seq-ApiKey"] = SEQ_API_KEY;
   }
-  const response = await fetch(url.toString(), { headers });
+  let response;
+  try {
+    response = await fetch(url.toString(), {
+      headers,
+      signal: AbortSignal.timeout(SEQ_REQUEST_TIMEOUT_MS)
+    });
+  } catch (err) {
+    if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
+      throw new Error(
+        `Seq request timed out after ${SEQ_REQUEST_TIMEOUT_MS}ms. The Seq server at ${SEQ_BASE_URL} did not respond in time; increase SEQ_REQUEST_TIMEOUT_MS or check that it is reachable.`
+      );
+    }
+    throw err;
+  }
   if (!response.ok) {
     let body = "";
     try {
@@ -36776,8 +36793,17 @@ Tips:
           truncated = true;
         }
         if (truncated) {
-          const meta = { truncated: true, returned: safeEvents.length, truncation_message: `Response exceeded ${CHARACTER_LIMIT} characters. Reduce 'count', narrow the time 'range', or add a 'filter' expression to get more targeted results.` };
-          text = JSON.stringify({ ...meta, events: safeEvents }, null, 2);
+          const withMeta = () => JSON.stringify({
+            truncated: true,
+            returned: safeEvents.length,
+            truncation_message: `Response exceeded ${CHARACTER_LIMIT} characters. Reduce 'count', narrow the time 'range', or add a 'filter' expression to get more targeted results.`,
+            events: safeEvents
+          }, null, 2);
+          text = withMeta();
+          while (text.length > CHARACTER_LIMIT && safeEvents.length > 1) {
+            safeEvents.splice(Math.ceil(safeEvents.length / 2));
+            text = withMeta();
+          }
         }
         return {
           content: [{

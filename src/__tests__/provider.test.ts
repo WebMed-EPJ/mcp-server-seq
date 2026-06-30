@@ -152,6 +152,41 @@ describe('EntraOAuthProvider', () => {
     expect(url.searchParams.get('code')).toBeNull();
   });
 
+  it('exchangeAuthorizationCode: a mismatched client is rejected WITHOUT burning the code', async () => {
+    const provider = new EntraOAuthProvider({ entra: makeEntraConfig(), publicBaseUrl: PUBLIC_URL });
+    // Seed a code bound to client "c1".
+    const code = provider.clientsStore.issueCode({
+      mcpClientId: 'c1',
+      mcpCodeChallenge: 'chal',
+      homeAccountId: 'home1',
+    });
+    const wrongClient = { client_id: 'attacker', redirect_uris: [] } as never;
+    const rightClient = { client_id: 'c1', redirect_uris: [] } as never;
+
+    // Wrong client → invalid_grant, and the code must survive (peek → check → take).
+    await expect(provider.exchangeAuthorizationCode(wrongClient, code)).rejects.toThrow('invalid_grant');
+    expect(provider.clientsStore.peekCode(code)?.homeAccountId).toBe('home1');
+
+    // The legitimate client can then still exchange it; afterwards it's consumed.
+    const tokens = await provider.exchangeAuthorizationCode(rightClient, code);
+    expect(tokens.access_token).toBeTruthy();
+    expect(provider.clientsStore.peekCode(code)).toBeUndefined();
+  });
+
+  it('exchangeRefreshToken: a mismatched client is rejected WITHOUT burning the token', async () => {
+    const provider = new EntraOAuthProvider({ entra: makeEntraConfig(), publicBaseUrl: PUBLIC_URL });
+    const { refreshToken } = provider.clientsStore.issueTokens('c1', 'home1', ['openid']);
+    const wrongClient = { client_id: 'attacker', redirect_uris: [] } as never;
+    const rightClient = { client_id: 'c1', redirect_uris: [] } as never;
+
+    await expect(provider.exchangeRefreshToken(wrongClient, refreshToken)).rejects.toThrow('invalid_grant');
+    expect(provider.clientsStore.peekRefresh(refreshToken)?.homeAccountId).toBe('home1');
+
+    const tokens = await provider.exchangeRefreshToken(rightClient, refreshToken);
+    expect(tokens.access_token).toBeTruthy();
+    expect(provider.clientsStore.peekRefresh(refreshToken)).toBeUndefined();
+  });
+
   it('handleEntraCallback: Entra returns no account → redirect with error=server_error', async () => {
     const provider = new EntraOAuthProvider({ entra: makeEntraConfig(), publicBaseUrl: PUBLIC_URL });
     seedPending(provider, 'state1');

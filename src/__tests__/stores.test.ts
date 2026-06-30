@@ -144,21 +144,53 @@ describe('OAuthStore', () => {
     expect(store.getClient(live.client_id)?.client_id).toBe(live.client_id);
   });
 
+  it('peekRefresh returns the record without consuming it', () => {
+    const { store } = makeStore();
+    const { refreshToken } = store.issueTokens('c1', 'home1', ['openid']);
+    expect(store.peekRefresh(refreshToken)?.homeAccountId).toBe('home1');
+    // Peeking twice still works (non-destructive), and takeRefresh still consumes.
+    expect(store.peekRefresh(refreshToken)?.clientId).toBe('c1');
+    expect(store.takeRefresh(refreshToken)?.homeAccountId).toBe('home1');
+    expect(store.peekRefresh(refreshToken)).toBeUndefined();
+  });
+
   it('sweep() evicts expired pending/codes/sessions/refresh but keeps live ones', () => {
     const { store, tick } = makeStore();
-    // Live entries created after the tick should survive the sweep.
+    // Stale entries across ALL four TTL-bounded maps. Tick past the LONGEST TTL
+    // (refresh, 30d) so every one of them is expired before the sweep.
+    const stalePending = 'stale-state';
+    store.putPending(stalePending, {
+      mcpClientId: 'c1',
+      mcpRedirectUri: 'https://claude.ai/cb',
+      mcpCodeChallenge: 'p',
+      entraVerifier: 'v',
+    });
     const staleCode = store.issueCode({ mcpClientId: 'c1', mcpCodeChallenge: 'x', homeAccountId: 'h' });
-    const { accessToken: staleAccess } = store.issueTokens('c1', 'h', ['s']);
-    tick(ACCESS_TOKEN_TTL_SECONDS + 1); // expire the above
+    const { accessToken: staleAccess, refreshToken: staleRefresh } = store.issueTokens('c1', 'h', ['s']);
+    tick(REFRESH_TOKEN_TTL_SECONDS + 1); // expire all of the above
 
+    // Live entries created after the tick should survive the sweep.
+    const livePending = 'live-state';
+    store.putPending(livePending, {
+      mcpClientId: 'c1',
+      mcpRedirectUri: 'https://claude.ai/cb',
+      mcpCodeChallenge: 'q',
+      entraVerifier: 'v',
+    });
     const liveCode = store.issueCode({ mcpClientId: 'c1', mcpCodeChallenge: 'y', homeAccountId: 'h' });
-    const { accessToken: liveAccess } = store.issueTokens('c1', 'h', ['s']);
+    const { accessToken: liveAccess, refreshToken: liveRefresh } = store.issueTokens('c1', 'h', ['s']);
 
     store.sweep();
 
+    // Stale entries are gone from every map…
+    expect(store.takePending(stalePending)).toBeUndefined();
     expect(store.peekCode(staleCode)).toBeUndefined();
     expect(store.verifyAccess(staleAccess)).toBeUndefined();
+    expect(store.peekRefresh(staleRefresh)).toBeUndefined();
+    // …and the live ones survived.
     expect(store.peekCode(liveCode)?.mcpCodeChallenge).toBe('y');
     expect(store.verifyAccess(liveAccess)?.homeAccountId).toBe('h');
+    expect(store.peekRefresh(liveRefresh)?.homeAccountId).toBe('h');
+    expect(store.takePending(livePending)?.entraVerifier).toBe('v');
   });
 });

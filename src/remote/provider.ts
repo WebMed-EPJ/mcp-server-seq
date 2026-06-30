@@ -160,8 +160,10 @@ export class EntraOAuthProvider implements OAuthServerProvider {
         homeAccountId,
       });
       back({ code: ourCode });
-    } catch (err) {
-      back({ error: "server_error", error_description: (err as Error).message });
+    } catch {
+      // Never reflect the raw MSAL/exchange error to the client — it can carry
+      // internal diagnostics. Return a fixed server_error description.
+      back({ error: "server_error", error_description: "Sign-in failed. Please try again." });
     }
   }
 
@@ -181,10 +183,14 @@ export class EntraOAuthProvider implements OAuthServerProvider {
     client: OAuthClientInformationFull,
     authorizationCode: string,
   ): Promise<OAuthTokens> {
-    const rec = this.store.takeCode(authorizationCode);
+    // Verify client ownership BEFORE consuming: takeCode() is destructive, so
+    // checking after would let a mismatched-client request burn an otherwise
+    // valid one-time code. Peek → check → take.
+    const rec = this.store.peekCode(authorizationCode);
     if (!rec || rec.mcpClientId !== client.client_id) {
       throw new Error("invalid_grant");
     }
+    this.store.takeCode(authorizationCode);
     return this.issue(client.client_id, rec.homeAccountId);
   }
 
@@ -192,10 +198,13 @@ export class EntraOAuthProvider implements OAuthServerProvider {
     client: OAuthClientInformationFull,
     refreshToken: string,
   ): Promise<OAuthTokens> {
-    const rec = this.store.takeRefresh(refreshToken);
+    // Peek → check → take, as with authorization codes: don't consume (rotate)
+    // a valid refresh token on a mismatched-client request.
+    const rec = this.store.peekRefresh(refreshToken);
     if (!rec || rec.clientId !== client.client_id) {
       throw new Error("invalid_grant");
     }
+    this.store.takeRefresh(refreshToken);
     // Preserve the chain's original issuance time so the absolute lifetime
     // survives rotation (otherwise refreshing would reset the 30-day cap).
     return this.issue(client.client_id, rec.homeAccountId, rec.createdAt);

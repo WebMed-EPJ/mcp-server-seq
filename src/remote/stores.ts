@@ -167,6 +167,17 @@ export class OAuthStore implements OAuthRegisteredClientsStore {
   revokeRefresh(token: string): void {
     this.refresh.delete(token);
   }
+  /** Non-consuming refresh lookup so a caller can verify client ownership BEFORE
+   *  consuming (takeRefresh is destructive — checking after would let a
+   *  mismatched-client request burn a valid token). Past the CHAIN's absolute
+   *  lifetime → undefined. */
+  peekRefresh(
+    token: string,
+  ): { homeAccountId: string; clientId: string; scopes: string[]; createdAt: number } | undefined {
+    const r = this.refresh.get(token);
+    if (!r) return undefined;
+    return this.now() - r.createdAt > REFRESH_TOKEN_TTL_SECONDS ? undefined : r;
+  }
   /** Consume a refresh token (rotated: removed on use). Past the CHAIN's absolute
    *  lifetime it is rejected, so a leaked token can't refresh forever. Returns
    *  `createdAt` (the chain's original issuance time) so the caller can preserve

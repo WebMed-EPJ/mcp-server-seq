@@ -21,7 +21,10 @@ FROM node:22-alpine AS build
 LABEL maintainer="WebMed EPJ"
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci
+# --ignore-scripts: this package's `prepare` lifecycle runs `npm run build`
+# (tsc + esbuild), which would fire here before tsconfig.json/src are copied
+# (and fail). We build explicitly with the `npx tsc` step below instead.
+RUN npm ci --ignore-scripts
 COPY tsconfig.json ./
 COPY src ./src
 RUN npx tsc -p tsconfig.json --outDir dist-server
@@ -32,7 +35,10 @@ ENV NODE_ENV=production
 ENV PORT=8790
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+# --ignore-scripts: same reason as the build stage — and here devDependencies
+# (tsc/esbuild) are absent, so the `prepare` build would fail outright. The
+# runtime only needs the prod deps installed; dist-server is copied in below.
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY --from=build /app/dist-server ./dist-server
 EXPOSE 8790
 USER node
