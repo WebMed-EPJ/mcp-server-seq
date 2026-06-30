@@ -172,6 +172,84 @@ Add to your `claude_desktop_config.json`:
 }
 ```
 
+## Remote (hosted) HTTP server + Docker
+
+In addition to the stdio transport above, the server ships a **remote HTTP entry
+point** (`src/remote.ts`) that exposes the same tools as an OAuth-protected
+**Streamable HTTP** MCP server, packaged as a Docker image. Use this to host the
+connector centrally (e.g. for Claude Team / claude.ai) instead of running it
+locally per user.
+
+### Authentication
+
+Access to the `/mcp` endpoint is a full **OAuth 2.1** flow (dynamic client
+registration + PKCE) federated to **Microsoft Entra** — the same sign-in model
+as the WebMed Lime/m365 connectors. Sign-in only **authenticates** the caller;
+the Seq API key stays **global and server-side** (there is no per-user Seq
+token). Every authenticated user is served by the same Seq client, and every log
+response is still PII-redacted (see [Privacy](#privacy--pii-redaction)) before it
+leaves the process.
+
+Endpoints: `/healthz` (unauthenticated liveness), the OAuth metadata/`/authorize`/
+`/token`/`/revoke`/`/register` routes, `/callback` (Entra redirect), and `/mcp`
+(bearer-protected; `POST` only, `GET`/`DELETE` → `405`).
+
+### Configuration (remote server)
+
+In addition to `SEQ_BASE_URL` / `SEQ_API_KEY` (the remote server **requires**
+`SEQ_API_KEY` and refuses to start without it), the remote entry point needs:
+
+| Variable | Required | Description |
+| --- | --- | --- |
+| `REMOTE_PUBLIC_URL` | yes | Public **https** origin clients reach (e.g. `https://seq-mcp.webmed.no`). The OAuth metadata and the Entra redirect URI (`<origin>/callback`) are derived from it. |
+| `TENANT_ID` | yes | Microsoft Entra tenant (WebMed). |
+| `CLIENT_ID` | yes | Entra app registration (confidential client). |
+| `CLIENT_SECRET` | yes | Client secret for the `/callback` exchange. |
+| `ENTRA_SCOPES` | no | Sign-in scopes, space-separated. Default OIDC only: `openid profile email offline_access` (no Graph). |
+| `PORT` | no | Listen port (plain HTTP — terminate TLS in front). Default `8790`. |
+| `TRUST_PROXY_HOPS` | no | Reverse-proxy hop count for client-IP rate-limiting. Default `1`. Never set higher than the real hop count. |
+| `MAX_JSON_BODY` | no | Max `/mcp` request body. Default `1mb`. |
+| `SEQ_LOG_LEVEL` | no | `debug`/`info`/`warn`/`error`/`silent`. Default `info`. Logs to stderr; never logs the API key, bodies or PII. |
+
+Register the Entra app as a **confidential** client with a **Web** redirect URI
+of `<REMOTE_PUBLIC_URL>/callback` and a client secret. See `.env.example` for a
+copyable template.
+
+### Build & run with Docker
+
+```bash
+# Build (from the repo root)
+docker build -t webmed-seq-connector .
+
+# Run (terminate TLS in front; REMOTE_PUBLIC_URL is the public https origin)
+docker run --rm -p 8790:8790 \
+  -e REMOTE_PUBLIC_URL=https://seq-mcp.webmed.no \
+  -e TENANT_ID=… -e CLIENT_ID=… -e CLIENT_SECRET=… \
+  -e SEQ_BASE_URL=https://seq.internal.webmed.no \
+  -e SEQ_API_KEY=… \
+  webmed-seq-connector
+```
+
+The image is a multi-stage build (compile TypeScript, then a slim prod-only Node
+runtime) and includes a `HEALTHCHECK` against `/healthz`. Deployment notes: the
+process speaks plain HTTP — put a TLS-terminating ingress in front and set
+`REMOTE_PUBLIC_URL` to the public https origin. OAuth state is kept **in-memory**,
+so run a **single instance** (for HA, back the token store with a shared store —
+see `src/remote/stores.ts`).
+
+### Run the remote server without Docker
+
+```bash
+REMOTE_PUBLIC_URL=https://seq-mcp.webmed.no \
+TENANT_ID=… CLIENT_ID=… CLIENT_SECRET=… \
+SEQ_BASE_URL=https://seq.internal.webmed.no SEQ_API_KEY=… \
+npm run start:remote
+```
+
+> The stdio bundle (`build/seq-server.js`, consumed by the `seq-ops` Claude Code
+> plugin) is **unchanged** by this and stays dependency-free — `express` and
+> `@azure/msal-node` are only pulled in by the remote entry point.
+
 ## Development
 
 Install dependencies:

@@ -149,3 +149,8 @@ dist
 # consumed by the claude-plugins `seq-ops` marketplace plugin.
 build/*
 !build/seq-server.js
+
+# Remote-server TypeScript output (compiled in the Docker build / start:remote)
+# and the test compile output. Never committed — rebuilt from src/.
+dist-server
+dist-test
