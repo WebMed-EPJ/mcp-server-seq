@@ -36634,7 +36634,12 @@ async function makeSeqRequest(endpoint, params = {}) {
       body = await response.text();
     } catch {
     }
-    throw new Error(`Seq API error ${response.status} (${response.statusText})${body ? `: ${body}` : ""}`);
+    const safeBody = body ? await redactText(body) : "";
+    const error2 = new Error(
+      `Seq API error ${response.status} (${response.statusText})${safeBody ? `: ${safeBody}` : ""}`
+    );
+    error2.status = response.status;
+    throw error2;
   }
   return response.json();
 }

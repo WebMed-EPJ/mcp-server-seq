@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { redactDeep } from "./redact.js";
+import { redactDeep, redactText } from "./redact.js";
 import { resolveDataRange } from "./timerange.js";
 
 // Configuration and constants. Read from the environment once at module load so
@@ -61,7 +61,18 @@ async function makeSeqRequest<T>(endpoint: string, params: Record<string, string
   if (!response.ok) {
     let body = '';
     try { body = await response.text(); } catch { /* ignore */ }
-    throw new Error(`Seq API error ${response.status} (${response.statusText})${body ? `: ${body}` : ''}`);
+    // A Seq error body bypasses the success-path redactDeep yet can echo PII
+    // (the filter/query the caller sent, or a log snippet). Redact it before it
+    // goes anywhere, and attach a numeric `status` so the logger's errorFields()
+    // suppresses even the redacted text from logs (it surfaces only status + a
+    // fixed summary). The redacted snippet still reaches the caller (Claude) for
+    // self-correction — e.g. an invalid-filter message — without leaking PII.
+    const safeBody = body ? await redactText(body) : '';
+    const error = new Error(
+      `Seq API error ${response.status} (${response.statusText})${safeBody ? `: ${safeBody}` : ''}`,
+    ) as Error & { status?: number };
+    error.status = response.status;
+    throw error;
   }
 
   return response.json();
