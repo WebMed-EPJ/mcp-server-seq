@@ -12,24 +12,32 @@ compatibility: Requires the mcp-server-seq MCP server. Install with: claude mcp 
 
 # Seq Operations
 
-You have four tools from the `seq` MCP server:
+You have four Seq tools. Under the WebMed marketplace plugin they're served by two MCP
+servers — **`seq-prod`** (production Seq, `seq.intern.webmed.no`) and **`seq-test`** (the
+test environment, `seq.k8s.webmedepj.no`). The examples below use the **`seq-prod:`** prefix
+since incident work is usually about prod; **swap `seq-prod:` for `seq-test:`** to run the
+exact same query against the test environment.
 
 | Tool | Purpose |
 |------|---------|
-| `seq:get_alert_state` | Current state of all configured alerts (firing / ok / suppressed) |
-| `seq:get_signals` | List saved named filters — call this early to discover available signal IDs |
-| `seq:get_events` | Query structured log events with filters, time ranges, and pagination |
-| `seq:sql_query` | Run SQL-style aggregations (count, sum, mean, percentile, group by, time-slicing) — use instead of `seq:get_events` for rollups |
+| `seq-prod:get_alert_state` | Current state of all configured alerts (firing / ok / suppressed) |
+| `seq-prod:get_signals` | List saved named filters — call this early to discover available signal IDs |
+| `seq-prod:get_events` | Query structured log events with filters, time ranges, and pagination |
+| `seq-prod:sql_query` | Run SQL-style aggregations (count, sum, mean, percentile, group by, time-slicing) — use instead of `seq-prod:get_events` for rollups |
 
-**Reach for `seq:sql_query`, not `seq:get_events`, whenever the answer is a number or a breakdown** — "how many errors", "which service is worst", "p95 latency over time". `seq:get_events` returns raw rows you'd have to count by hand (and large result sets get truncated); `seq:sql_query` computes the aggregate server-side.
+**Reach for `seq-prod:sql_query`, not `seq-prod:get_events`, whenever the answer is a number or a breakdown** — "how many errors", "which service is worst", "p95 latency over time". `seq-prod:get_events` returns raw rows you'd have to count by hand (and large result sets get truncated); `seq-prod:sql_query` computes the aggregate server-side.
 
 ## Setup (for users installing this skill)
+
+Via the **WebMed marketplace plugin** (`seq-ops@webmed`) the `seq-prod` and `seq-test`
+servers are already wired to the hosted gatekeeper — nothing to add. For a standalone /
+local install, name the server `seq-prod` so the tool prefixes in this skill match:
 
 ```bash
 claude mcp add --transport stdio \
   --env SEQ_BASE_URL=http://localhost:5341 \
   --env SEQ_API_KEY=your-api-key \
-  seq -- npx -y mcp-seq
+  seq-prod -- npx -y mcp-seq
 ```
 
 ---
@@ -40,8 +48,8 @@ Follow this sequence — don't jump straight to events without first knowing wha
 
 ### Step 1 — Orient
 Always start here:
-1. `seq:get_alert_state` → any currently firing alerts?
-2. `seq:get_signals` → what named filters exist? Note their IDs — they're your shortcuts.
+1. `seq-prod:get_alert_state` → any currently firing alerts?
+2. `seq-prod:get_signals` → what named filters exist? Note their IDs — they're your shortcuts.
 
 **Scoping to a customer / office (WebMed prod).** Each customer (legekontor / office) is a distinct tenant. Every event carries an **`Environment`** property whose value is a short tenant **slug**. In production each tenant also has a saved signal titled **`WebMed - {Name}`** using the display name. **The slug is an assigned identifier — often an abbreviation — and is NOT derivable from the display name. Never guess it:**
 
@@ -49,7 +57,7 @@ Always start here:
 > `Environment = 'hortenkomls'`    ⇄ signal `WebMed - Horten kommunale legesenter`
 
 So when the user names a customer, resolve the slug rather than constructing it:
-- **Preferred:** call `seq:get_signals`, match the title by its `WebMed -` prefix plus the display name (match loosely — spacing/casing vary), and pass that signal `id` to `seq:get_events`/`seq:sql_query`. The signal encodes the exact tenant filter, so you never touch the slug.
+- **Preferred:** call `seq-prod:get_signals`, match the title by its `WebMed -` prefix plus the display name (match loosely — spacing/casing vary), and pass that signal `id` to `seq-prod:get_events`/`seq-prod:sql_query`. The signal encodes the exact tenant filter, so you never touch the slug.
 - **Name ⇄ slug mapping lives in Lime CRM** — look it up there (the Lime MCP connector exposes the office records) when you have a name but not the slug, or need to turn an `Environment` value from a query back into a real customer name.
 - Only after you've confirmed the slug from one of the above, filter directly: `filter: Environment = '{slug}'` (e.g. `Environment = 'hortenkomls'`).
 
@@ -86,7 +94,7 @@ Use `render: true` to get human-readable messages instead of raw templates.
 Use `after: <lastEventId>` to paginate if results are truncated.
 
 ### Step 4 — Quantify
-Once you've seen the raw events, switch to `seq:sql_query` to measure the shape of the problem instead of eyeballing rows:
+Once you've seen the raw events, switch to `seq-prod:sql_query` to measure the shape of the problem instead of eyeballing rows:
 ```sql
 -- Which services are erroring, worst first?
 select Application, count(*) from stream where @Level in ['Error','Fatal'] group by Application order by count(*) desc
@@ -97,7 +105,7 @@ select count(*) from stream where @Level = 'Error' group by time(5m)
 -- Latency tail on the suspect endpoint
 select percentile(Elapsed, 95) from stream where RequestPath like '/api/checkout%' group by time(1m)
 ```
-Scope the same way as `seq:get_events` — pass a `signal`, a `range`, or explicit `fromDateUtc`/`toDateUtc`.
+Scope the same way as `seq-prod:get_events` — pass a `signal`, a `range`, or explicit `fromDateUtc`/`toDateUtc`.
 
 ### Step 5 — Pattern
 Before concluding, ask:
@@ -125,7 +133,7 @@ StatusCode >= 500
 RequestPath like '/api/checkout%'
 Application = 'my-service'
 UserId = 'user-123'
-Environment = 'hortenkomls'   # tenant slug — opaque/abbreviated; resolve via seq:get_signals or Lime CRM (signal: WebMed - Horten kommunale legesenter)
+Environment = 'hortenkomls'   # tenant slug — opaque/abbreviated; resolve via seq-prod:get_signals or Lime CRM (signal: WebMed - Horten kommunale legesenter)
 
 # Combining
 @Level = 'Error' and Application = 'payments' and StatusCode >= 500
@@ -133,9 +141,9 @@ Environment = 'hortenkomls'   # tenant slug — opaque/abbreviated; resolve via 
 # Time range shortcuts: 1m, 15m, 30m, 1h, 2h, 6h, 12h, 1d, 7d, 14d, 30d
 ```
 
-The same filter expressions work as the `where` clause of a `seq:sql_query`.
+The same filter expressions work as the `where` clause of a `seq-prod:sql_query`.
 
-### Aggregations (`seq:sql_query`)
+### Aggregations (`seq-prod:sql_query`)
 
 ```sql
 -- Count by group
@@ -192,11 +200,11 @@ Keep it actionable — the person reading this may be mid-incident. Lead with wh
 ## Common Scenarios
 
 **Morning health check**
-→ `seq:get_alert_state` + `seq:get_events` with `range: "8h"`, `filter: @Level in ['Error', 'Fatal']`
+→ `seq-prod:get_alert_state` + `seq-prod:get_events` with `range: "8h"`, `filter: @Level in ['Error', 'Fatal']`
 → Note any services with unusually high error counts compared to normal
 
 **Active incident**
-→ Start with `seq:get_alert_state` to confirm scope, then zoom into the affected service
+→ Start with `seq-prod:get_alert_state` to confirm scope, then zoom into the affected service
 → Look for the first occurrence of the error — when did it start?
 → Check if it correlates with a deployment or config change
 
@@ -210,11 +218,11 @@ Keep it actionable — the person reading this may be mid-incident. Lead with wh
 → Look for timeout patterns: `@Message like '%timeout%' or @Exception like '%TimeoutException%'`
 
 **Single customer / office reported a problem**
-→ Resolve the tenant first: find their signal via `seq:get_signals` (title `WebMed - {Name}`) and scope with its `id`, or get the slug from Lime CRM — don't guess it
-→ Then quantify: `seq:sql_query` → `select count(*) from stream where @Level = 'Error' and Environment = 'hortenkomls' group by time(5m)`
+→ Resolve the tenant first: find their signal via `seq-prod:get_signals` (title `WebMed - {Name}`) and scope with its `id`, or get the slug from Lime CRM — don't guess it
+→ Then quantify: `seq-prod:sql_query` → `select count(*) from stream where @Level = 'Error' and Environment = 'hortenkomls' group by time(5m)`
 → Compare against the fleet — is only this office affected, or is it a broader incident?
 
 **Which customers are affected? (cross-tenant triage)**
-→ `seq:sql_query` → `select Environment, count(*) from stream where @Level in ['Error','Fatal'] group by Environment order by count(*) desc`
+→ `seq-prod:sql_query` → `select Environment, count(*) from stream where @Level in ['Error','Fatal'] group by Environment order by count(*) desc`
 → Surfaces the worst-hit offices in one call instead of querying signals one by one
 → The result lists raw `Environment` slugs — map them back to customer names via Lime CRM before reporting
