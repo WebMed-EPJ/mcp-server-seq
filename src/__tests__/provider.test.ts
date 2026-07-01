@@ -1,5 +1,5 @@
 import { InvalidRequestError, InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
-import { EntraOAuthProvider, type EntraConfig } from '../remote/provider.js';
+import { EntraOAuthProvider, entraErrorFields, type EntraConfig } from '../remote/provider.js';
 
 // Minimal confidential-client config; the MSAL client is constructed but never
 // hits the network in these tests (no token acquisition is triggered).
@@ -195,5 +195,37 @@ describe('EntraOAuthProvider', () => {
     await provider.handleEntraCallback({ state: 'state1', code: 'entra-code' }, res);
     expect(calls.redirect).toBeTruthy();
     expect(new URL(calls.redirect!).searchParams.get('error')).toBe('server_error');
+  });
+});
+
+describe('entraErrorFields', () => {
+  it('keeps only non-PII codes and never leaks a UPN-bearing MSAL message', () => {
+    const err = Object.assign(
+      new Error("AADSTS50020: User account 'jane.doe@webmed.no' from identity provider does not exist in tenant"),
+      { name: 'ServerError', errorCode: 'invalid_grant' },
+    );
+    const fields = entraErrorFields(err);
+    expect(fields).toEqual({ errorName: 'ServerError', errorCode: 'invalid_grant', aadsts: 'AADSTS50020' });
+    // The UPN in the message must not survive into the log fields.
+    expect(JSON.stringify(fields)).not.toContain('jane.doe@webmed.no');
+    expect(JSON.stringify(fields)).not.toContain('User account');
+  });
+
+  it('extracts the AADSTS code for a bad client secret', () => {
+    const err = Object.assign(new Error('AADSTS7000215: Invalid client secret provided.'), {
+      name: 'ClientAuthError',
+      errorCode: 'invalid_client',
+    });
+    expect(entraErrorFields(err)).toEqual({
+      errorName: 'ClientAuthError',
+      errorCode: 'invalid_client',
+      aadsts: 'AADSTS7000215',
+    });
+  });
+
+  it('handles non-Error values without throwing or leaking', () => {
+    expect(entraErrorFields('boom')).toEqual({});
+    expect(entraErrorFields(null)).toEqual({});
+    expect(entraErrorFields(new Error('plain failure, no codes'))).toEqual({ errorName: 'Error' });
   });
 });
