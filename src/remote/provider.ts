@@ -35,6 +35,7 @@ import type {
   OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { OAuthStore } from "./stores.js";
+import { errorFields, silentLogger, type Logger } from "../logger.js";
 
 /** The Entra app registration + sign-in scopes used to authenticate users. */
 export interface EntraConfig {
@@ -50,6 +51,9 @@ export interface RemoteOptions {
   entra: EntraConfig;
   /** Public https origin claude.ai reaches, e.g. "https://seq-mcp.webmed.no". */
   publicBaseUrl: string;
+  /** Optional logger (defaults to silent). Records PII-safe reasons for a failed
+   *  Entra confidential-client exchange, which is otherwise swallowed. */
+  logger?: Logger;
 }
 
 export class EntraOAuthProvider implements OAuthServerProvider {
@@ -58,6 +62,7 @@ export class EntraOAuthProvider implements OAuthServerProvider {
   private readonly crypto = new CryptoProvider();
   private readonly callbackUri: string;
   private readonly scopes: string[];
+  private readonly logger: Logger;
 
   constructor(private readonly opts: RemoteOptions) {
     const { entra } = opts;
@@ -73,6 +78,7 @@ export class EntraOAuthProvider implements OAuthServerProvider {
     });
     this.callbackUri = new URL("/callback", opts.publicBaseUrl).href;
     this.scopes = entra.scopes;
+    this.logger = opts.logger ?? silentLogger;
   }
 
   get clientsStore(): OAuthStore {
@@ -151,6 +157,7 @@ export class EntraOAuthProvider implements OAuthServerProvider {
       });
       const homeAccountId = result.account?.homeAccountId;
       if (!homeAccountId) {
+        this.logger.warn("Entra token exchange returned no account");
         back({ error: "server_error", error_description: "No account returned by Entra." });
         return;
       }
@@ -160,9 +167,13 @@ export class EntraOAuthProvider implements OAuthServerProvider {
         homeAccountId,
       });
       back({ code: ourCode });
-    } catch {
-      // Never reflect the raw MSAL/exchange error to the client — it can carry
-      // internal diagnostics. Return a fixed server_error description.
+    } catch (err) {
+      // Log the reason server-side so a failing confidential-client exchange —
+      // e.g. a wrong/expired CLIENT_SECRET (AADSTS7000215) — is diagnosable
+      // instead of a silent server_error redirect. errorFields is PII-safe: it
+      // keeps the MSAL/AADSTS message + status, never tokens or user data. Still
+      // never reflect the raw error to the client — return a fixed description.
+      this.logger.warn("Entra token exchange failed", errorFields(err));
       back({ error: "server_error", error_description: "Sign-in failed. Please try again." });
     }
   }
