@@ -59,11 +59,16 @@ function verifier() {
 }
 
 describe('loadServiceAuthConfig', () => {
-  const saved = { ...process.env };
+  const KEYS = ['ENTRA_ALLOWED_CLIENT_IDS', 'ENTRA_AUDIENCE', 'ENTRA_REQUIRED_ROLE'] as const;
+  const saved: Record<string, string | undefined> = {};
+  beforeEach(() => KEYS.forEach((k) => (saved[k] = process.env[k])));
   afterEach(() => {
-    process.env.ENTRA_ALLOWED_CLIENT_IDS = saved.ENTRA_ALLOWED_CLIENT_IDS;
-    process.env.ENTRA_AUDIENCE = saved.ENTRA_AUDIENCE;
-    process.env.ENTRA_REQUIRED_ROLE = saved.ENTRA_REQUIRED_ROLE;
+    // Restore by DELETING keys that were originally unset — assigning `undefined`
+    // would leave the literal string "undefined" and leak into later tests.
+    KEYS.forEach((k) => {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    });
   });
 
   it('is disabled (null) when no allow-list is set', () => {
@@ -109,6 +114,13 @@ describe('createServiceTokenVerifier', () => {
 
   it('returns null for a non-JWT (opaque user token falls through)', async () => {
     expect(await verifier()('opaque-token-value')).toBeNull();
+  });
+
+  it('matches the caller GUID case-insensitively (mixed-case allow-list + token azp)', async () => {
+    // Allow-list has an UPPERCASE GUID; token azp is lowercase — must still match.
+    const cfg: ServiceAuthConfig = { ...CONFIG, allowedClientIds: [CALLER.toUpperCase()] };
+    const token = await signToken({ roles: ['Connector.Access'], azp: CALLER });
+    expect(await createServiceTokenVerifier(cfg, publicKey)(token)).not.toBeNull();
   });
 
   it('rejects a wrong audience', async () => {

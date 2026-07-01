@@ -229,3 +229,48 @@ describe('entraErrorFields', () => {
     expect(entraErrorFields(new Error('plain failure, no codes'))).toEqual({ errorName: 'Error' });
   });
 });
+
+describe('verifyAccessToken: serviceVerifier branch', () => {
+  const svcInfo = {
+    token: 'svc-token',
+    clientId: 'caller-app',
+    scopes: ['Connector.Access'],
+    expiresAt: 9999999999,
+    extra: { homeAccountId: 'service:caller-app', service: true },
+  };
+
+  it('returns the serviceVerifier result and does NOT consult the opaque store', async () => {
+    let storeConsulted = false;
+    const provider = new EntraOAuthProvider({
+      entra: makeEntraConfig(),
+      publicBaseUrl: PUBLIC_URL,
+      serviceVerifier: async () => svcInfo,
+    });
+    // Spy on the store: if the service path short-circuits, this never runs.
+    const store = provider.clientsStore as unknown as { verifyAccess: (t: string) => unknown };
+    const orig = store.verifyAccess.bind(store);
+    store.verifyAccess = (t: string) => {
+      storeConsulted = true;
+      return orig(t);
+    };
+
+    // 'not-in-store' would throw InvalidTokenError via the store path.
+    await expect(provider.verifyAccessToken('not-in-store')).resolves.toEqual(svcInfo);
+    expect(storeConsulted).toBe(false);
+  });
+
+  it('falls through to the store when the serviceVerifier returns null', async () => {
+    const provider = new EntraOAuthProvider({
+      entra: makeEntraConfig(),
+      publicBaseUrl: PUBLIC_URL,
+      serviceVerifier: async () => null,
+    });
+    let caught: unknown;
+    try {
+      await provider.verifyAccessToken('unknown-token');
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(InvalidTokenError);
+  });
+});

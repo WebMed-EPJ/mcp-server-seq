@@ -44,6 +44,19 @@ function splitList(value: string | undefined): string[] {
     .filter(Boolean);
 }
 
+const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Entra app (client) IDs are GUIDs — case-insensitive identifiers. Entra emits
+ * `azp`/`appid`/GUID `aud` in lowercase, but operators paste the Application
+ * (client) ID from the portal in mixed case. Lowercase bare-GUID values so a
+ * casing mismatch can't silently lock out a legitimate caller. Non-GUID
+ * audiences (App ID URIs like `api://…`) are left untouched.
+ */
+function normalizeGuid(value: string): string {
+  return GUID_RE.test(value) ? value.toLowerCase() : value;
+}
+
 /**
  * Build the service-auth config from the environment, or return null (disabled)
  * when ENTRA_ALLOWED_CLIENT_IDS is unset/empty — machine auth is opt-in. Throws
@@ -86,7 +99,9 @@ export function createServiceTokenVerifier(
     `https://login.microsoftonline.com/${config.tenantId}/v2.0`,
     `https://sts.windows.net/${config.tenantId}/`,
   ];
-  const allowed = new Set(config.allowedClientIds);
+  // GUIDs are case-insensitive; lowercase them so a mixed-case env value still matches.
+  const audience = config.audiences.map(normalizeGuid);
+  const allowed = new Set(config.allowedClientIds.map(normalizeGuid));
 
   return async (token: string): Promise<AuthInfo | null> => {
     // Cheap gate: our own tokens are opaque (not JWTs). Skip non-JWTs so a normal
@@ -95,11 +110,13 @@ export function createServiceTokenVerifier(
 
     let payload: Record<string, unknown>;
     try {
-      ({ payload } = await jwtVerify(token, key as JWTVerifyGetKey, {
-        issuer,
-        audience: config.audiences,
-        algorithms: ["RS256"],
-      }));
+      // jose overloads a static key (KeyLike/Uint8Array) vs a getKey function;
+      // branch on the runtime shape so the union resolves without an unsafe cast.
+      const opts = { issuer, audience, algorithms: ["RS256"] };
+      ({ payload } =
+        typeof key === "function"
+          ? await jwtVerify(token, key, opts)
+          : await jwtVerify(token, key, opts));
     } catch (err) {
       // Signature/issuer/audience/expiry failure — errorFields is PII-safe.
       logger.warn("Entra service token verification failed", errorFields(err));
@@ -120,7 +137,7 @@ export function createServiceTokenVerifier(
     }
 
     const azp = typeof payload.azp === "string" ? payload.azp : typeof payload.appid === "string" ? payload.appid : "";
-    if (!allowed.has(azp)) {
+    if (!allowed.has(normalizeGuid(azp))) {
       // azp is an application (client) ID, not user PII — safe to log for triage.
       logger.warn("Entra service token from a non-allow-listed client", { azp });
       return null;
