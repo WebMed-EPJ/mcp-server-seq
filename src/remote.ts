@@ -84,7 +84,7 @@ async function main(): Promise<void> {
     );
   }
 
-  const provider = new EntraOAuthProvider({ entra: config.entra, publicBaseUrl: config.publicBaseUrl });
+  const provider = new EntraOAuthProvider({ entra: config.entra, publicBaseUrl: config.publicBaseUrl, logger });
 
   // Evict expired OAuth state every minute so abandoned flows / unused tokens
   // can't accumulate (lazy expiry alone never reclaims them). unref() so the

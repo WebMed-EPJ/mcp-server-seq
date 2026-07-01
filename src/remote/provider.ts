@@ -35,6 +35,7 @@ import type {
   OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { OAuthStore } from "./stores.js";
+import { silentLogger, type Logger, type LogFields } from "../logger.js";
 
 /** The Entra app registration + sign-in scopes used to authenticate users. */
 export interface EntraConfig {
@@ -50,6 +51,28 @@ export interface RemoteOptions {
   entra: EntraConfig;
   /** Public https origin claude.ai reaches, e.g. "https://seq-mcp.webmed.no". */
   publicBaseUrl: string;
+  /** Optional logger (defaults to silent). Records PII-safe reasons for a failed
+   *  Entra confidential-client exchange, which is otherwise swallowed. */
+  logger?: Logger;
+}
+
+/**
+ * PII-safe log fields for a failed Entra/MSAL exchange. MSAL error *messages*
+ * can embed a user's UPN/email (e.g. AADSTS50020 "User account '<upn>' from
+ * identity provider ... does not exist in tenant"), so we deliberately never log
+ * `err.message`. We keep only non-PII machine diagnostics: the error class name,
+ * MSAL's short `errorCode` ("invalid_client", "invalid_grant", ...), and the bare
+ * `AADSTS<digits>` code — enough to tell a bad secret (AADSTS7000215) from a
+ * tenant/redirect issue without leaking who was signing in.
+ */
+export function entraErrorFields(err: unknown): LogFields {
+  const e = (err ?? {}) as { name?: unknown; errorCode?: unknown; message?: unknown };
+  const fields: LogFields = {};
+  if (typeof e.name === "string" && e.name) fields.errorName = e.name;
+  if (typeof e.errorCode === "string" && e.errorCode) fields.errorCode = e.errorCode;
+  const aadsts = typeof e.message === "string" ? e.message.match(/AADSTS\d+/) : null;
+  if (aadsts) fields.aadsts = aadsts[0];
+  return fields;
 }
 
 export class EntraOAuthProvider implements OAuthServerProvider {
@@ -58,6 +81,7 @@ export class EntraOAuthProvider implements OAuthServerProvider {
   private readonly crypto = new CryptoProvider();
   private readonly callbackUri: string;
   private readonly scopes: string[];
+  private readonly logger: Logger;
 
   constructor(private readonly opts: RemoteOptions) {
     const { entra } = opts;
@@ -73,6 +97,7 @@ export class EntraOAuthProvider implements OAuthServerProvider {
     });
     this.callbackUri = new URL("/callback", opts.publicBaseUrl).href;
     this.scopes = entra.scopes;
+    this.logger = opts.logger ?? silentLogger;
   }
 
   get clientsStore(): OAuthStore {
@@ -151,6 +176,7 @@ export class EntraOAuthProvider implements OAuthServerProvider {
       });
       const homeAccountId = result.account?.homeAccountId;
       if (!homeAccountId) {
+        this.logger.warn("Entra token exchange returned no account");
         back({ error: "server_error", error_description: "No account returned by Entra." });
         return;
       }
@@ -160,9 +186,14 @@ export class EntraOAuthProvider implements OAuthServerProvider {
         homeAccountId,
       });
       back({ code: ourCode });
-    } catch {
-      // Never reflect the raw MSAL/exchange error to the client — it can carry
-      // internal diagnostics. Return a fixed server_error description.
+    } catch (err) {
+      // Log the reason server-side so a failing confidential-client exchange —
+      // e.g. a wrong/expired CLIENT_SECRET (AADSTS7000215) — is diagnosable
+      // instead of a silent server_error redirect. entraErrorFields is PII-safe:
+      // it logs only the error name, MSAL errorCode and the bare AADSTS code —
+      // never err.message, which can embed the user's UPN/email. Still never
+      // reflect the raw error to the client — return a fixed description.
+      this.logger.warn("Entra token exchange failed", entraErrorFields(err));
       back({ error: "server_error", error_description: "Sign-in failed. Please try again." });
     }
   }
