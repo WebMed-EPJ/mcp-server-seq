@@ -36,6 +36,7 @@ import type {
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { OAuthStore } from "./stores.js";
 import { silentLogger, type Logger, type LogFields } from "../logger.js";
+import type { ServiceTokenVerifier } from "./service-auth.js";
 
 /** The Entra app registration + sign-in scopes used to authenticate users. */
 export interface EntraConfig {
@@ -54,6 +55,12 @@ export interface RemoteOptions {
   /** Optional logger (defaults to silent). Records PII-safe reasons for a failed
    *  Entra confidential-client exchange, which is otherwise swallowed. */
   logger?: Logger;
+  /**
+   * Optional machine-to-machine token verifier (Entra app-only / client-credentials
+   * tokens). Tried before the interactive-user token store in verifyAccessToken;
+   * omit to allow only interactive-user sessions. See remote/service-auth.ts.
+   */
+  serviceVerifier?: ServiceTokenVerifier;
 }
 
 /**
@@ -82,6 +89,7 @@ export class EntraOAuthProvider implements OAuthServerProvider {
   private readonly callbackUri: string;
   private readonly scopes: string[];
   private readonly logger: Logger;
+  private readonly serviceVerifier?: ServiceTokenVerifier;
 
   constructor(private readonly opts: RemoteOptions) {
     const { entra } = opts;
@@ -98,6 +106,7 @@ export class EntraOAuthProvider implements OAuthServerProvider {
     this.callbackUri = new URL("/callback", opts.publicBaseUrl).href;
     this.scopes = entra.scopes;
     this.logger = opts.logger ?? silentLogger;
+    this.serviceVerifier = opts.serviceVerifier;
   }
 
   get clientsStore(): OAuthStore {
@@ -255,6 +264,14 @@ export class EntraOAuthProvider implements OAuthServerProvider {
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
+    // Machine-to-machine path first: a valid Entra app-only (client-credentials)
+    // token authenticates a headless service caller (e.g. Claude-in-Slack). The
+    // verifier returns null for our own opaque user tokens, which fall through.
+    if (this.serviceVerifier) {
+      const service = await this.serviceVerifier(token);
+      if (service) return service;
+    }
+
     const s = this.store.verifyAccess(token);
     if (!s) {
       // MUST be the SDK's InvalidTokenError, not a plain Error: requireBearerAuth

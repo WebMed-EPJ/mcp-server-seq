@@ -10,11 +10,18 @@
  * URL or OAuth app and never imports express/msal.
  */
 import type { EntraConfig } from "./remote/provider.js";
+import { loadServiceAuthConfig, type ServiceAuthConfig } from "./remote/service-auth.js";
 
 export interface RemoteConfig {
   entra: EntraConfig;
   /** Public https origin claude.ai reaches (REMOTE_PUBLIC_URL). */
   publicBaseUrl: string;
+  /**
+   * Machine-to-machine auth (Entra app-only tokens presented by headless callers
+   * such as Claude-in-Slack via an "OAuth 2.0 client credentials" credential).
+   * null = disabled (opt-in via ENTRA_ALLOWED_CLIENT_IDS). See remote/service-auth.ts.
+   */
+  serviceAuth: ServiceAuthConfig | null;
 }
 
 /**
@@ -64,5 +71,7 @@ export function loadRemoteConfig(): RemoteConfig {
     scopes,
   };
 
-  return { entra, publicBaseUrl };
+  const serviceAuth = loadServiceAuthConfig(entra.tenantId);
+
+  return { entra, publicBaseUrl, serviceAuth };
 }

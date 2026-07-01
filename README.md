@@ -210,10 +210,29 @@ In addition to `SEQ_BASE_URL` / `SEQ_API_KEY` (the remote server **requires**
 | `TRUST_PROXY_HOPS` | no | Reverse-proxy hop count for client-IP rate-limiting. Default `1`. Never set higher than the real hop count. |
 | `MAX_JSON_BODY` | no | Max `/mcp` request body. Default `1mb`. |
 | `SEQ_LOG_LEVEL` | no | `debug`/`info`/`warn`/`error`/`silent`. Default `info`. Logs to stderr; never logs the API key, bodies or PII. |
+| `ENTRA_ALLOWED_CLIENT_IDS` | no | **Opt-in switch for machine-to-machine auth.** Comma/space-separated Entra app (client) IDs allowed to call `/mcp` with an app-only token (the token `azp`/`appid`). Unset = interactive-user login only. |
+| `ENTRA_AUDIENCE` | if M2M | Acceptable token audience(s) — set **both** this API app's Application ID URI (`api://…`) and its client-id GUID. Required when `ENTRA_ALLOWED_CLIENT_IDS` is set (fail-closed). |
+| `ENTRA_REQUIRED_ROLE` | no | App role the token must carry in `roles`. Default `Connector.Access`. |
 
 Register the Entra app as a **confidential** client with a **Web** redirect URI
 of `<REMOTE_PUBLIC_URL>/callback` and a client secret. See `.env.example` for a
 copyable template.
+
+### Machine-to-machine auth (headless callers)
+
+The interactive OAuth login can't run headless (e.g. Claude triggered from
+Slack). For that, a caller connects with an **"OAuth 2.0 client credentials"**
+credential: it exchanges its own `client_id` + secret at a **token URL** for a
+short-lived token (RFC 6749 §4.4) and sends it as the `/mcp` bearer. Point that
+token URL at **Microsoft Entra** — the caller has its own Entra app, granted an
+**app role** (`Connector.Access` by default) on this API's app registration — so
+the client-credentials grant happens at Entra, not here. This server only
+**validates** the resulting app-only JWT (signature via Entra JWKS, issuer,
+audience, the required app role, and an `azp`/`appid` allow-list) in
+`src/remote/service-auth.ts`; it mints no secret. Enable it by setting
+`ENTRA_ALLOWED_CLIENT_IDS` (+ `ENTRA_AUDIENCE`); leave unset for interactive-only.
+Every response stays PII/fnr-redacted regardless of caller. Prerequisites on the
+API app: an **Application ID URI** and an **app role** the caller app is assigned.
 
 ### Build & run with Docker
 
