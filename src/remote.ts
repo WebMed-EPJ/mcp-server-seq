@@ -39,6 +39,7 @@ import { loadRemoteConfig } from "./remote-config.js";
 import { accessLogMiddleware, errorFields, loggerFromEnv } from "./logger.js";
 import { createSeqServer, SEQ_API_KEY, SEQ_BASE_URL } from "./server.js";
 import { EntraOAuthProvider } from "./remote/provider.js";
+import { createServiceTokenVerifier } from "./remote/service-auth.js";
 
 const logger = loggerFromEnv();
 
@@ -84,7 +85,17 @@ async function main(): Promise<void> {
     );
   }
 
-  const provider = new EntraOAuthProvider({ entra: config.entra, publicBaseUrl: config.publicBaseUrl, logger });
+  const serviceVerifier = config.serviceAuth
+    ? createServiceTokenVerifier(config.serviceAuth, undefined, logger)
+    : undefined;
+  if (config.serviceAuth) {
+    logger.info("service-token (machine) auth enabled", {
+      requiredRole: config.serviceAuth.requiredRole,
+      audiences: config.serviceAuth.audiences.length,
+      allowedClients: config.serviceAuth.allowedClientIds.length,
+    });
+  }
+  const provider = new EntraOAuthProvider({ entra: config.entra, publicBaseUrl: config.publicBaseUrl, logger, serviceVerifier });
 
   // Evict expired OAuth state every minute so abandoned flows / unused tokens
   // can't accumulate (lazy expiry alone never reclaims them). unref() so the
