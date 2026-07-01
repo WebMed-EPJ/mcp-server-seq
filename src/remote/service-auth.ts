@@ -91,9 +91,15 @@ export function createServiceTokenVerifier(
   keyInput?: JWTVerifyGetKey | KeyLike | Uint8Array,
   logger: Logger = silentLogger,
 ): ServiceTokenVerifier {
-  const key =
-    keyInput ??
-    createRemoteJWKSet(new URL(`https://login.microsoftonline.com/${config.tenantId}/discovery/v2.0/keys`));
+  // jose has separate overloads for a static key vs a getKey function. Normalize
+  // to a single JWTVerifyGetKey (wrap a static test key in a resolver) so the call
+  // site is one unambiguous overload — no union, no cast, no dual-branch.
+  const getKey: JWTVerifyGetKey =
+    typeof keyInput === "function"
+      ? keyInput
+      : keyInput !== undefined
+        ? () => keyInput
+        : createRemoteJWKSet(new URL(`https://login.microsoftonline.com/${config.tenantId}/discovery/v2.0/keys`));
   // Entra emits v2 (login.microsoftonline.com/<tid>/v2.0) or v1 (sts.windows.net/<tid>/) issuers.
   const issuer = [
     `https://login.microsoftonline.com/${config.tenantId}/v2.0`,
@@ -110,13 +116,7 @@ export function createServiceTokenVerifier(
 
     let payload: Record<string, unknown>;
     try {
-      // jose overloads a static key (KeyLike/Uint8Array) vs a getKey function;
-      // branch on the runtime shape so the union resolves without an unsafe cast.
-      const opts = { issuer, audience, algorithms: ["RS256"] };
-      ({ payload } =
-        typeof key === "function"
-          ? await jwtVerify(token, key, opts)
-          : await jwtVerify(token, key, opts));
+      ({ payload } = await jwtVerify(token, getKey, { issuer, audience, algorithms: ["RS256"] }));
     } catch (err) {
       // Signature/issuer/audience/expiry failure — errorFields is PII-safe.
       logger.warn("Entra service token verification failed", errorFields(err));
