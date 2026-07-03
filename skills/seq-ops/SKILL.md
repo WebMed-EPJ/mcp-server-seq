@@ -20,12 +20,30 @@ exact same query against the test environment.
 
 | Tool | Purpose |
 |------|---------|
-| `seq-prod:get_alert_state` | Current state of all configured alerts (firing / ok / suppressed) |
+| `seq-prod:get_alert_state` | Current state of all configured alerts (firing / ok / suppressed) — **usually unavailable, see the caveat below** |
 | `seq-prod:get_signals` | List saved named filters — call this early to discover available signal IDs |
 | `seq-prod:get_events` | Query structured log events with filters, time ranges, and pagination |
 | `seq-prod:sql_query` | Run SQL-style aggregations (count, sum, mean, percentile, group by, time-slicing) — use instead of `seq-prod:get_events` for rollups |
 
 **Reach for `seq-prod:sql_query`, not `seq-prod:get_events`, whenever the answer is a number or a breakdown** — "how many errors", "which service is worst", "p95 latency over time". `seq-prod:get_events` returns raw rows you'd have to count by hand (and large result sets get truncated); `seq-prod:sql_query` computes the aggregate server-side.
+
+> ### ⚠️ `get_alert_state` is usually unavailable — expect `403 Forbidden`
+>
+> The hosted Seq connector (`seq-prod` / `seq-test` via the marketplace plugin) authenticates
+> with a **shared, server-side API key that is scoped to read-only access**. Seq's **alert-state
+> API requires elevated permissions** that this key does not have, so `seq-prod:get_alert_state`
+> (and `seq-test:get_alert_state`) will **almost always fail with `403 Forbidden ("Unauthorized")`**.
+>
+> This is an expected permissions limitation, **not an outage and not a transient error** — do
+> **not** retry it, and do not report the 403 as "Seq is down". The other three tools
+> (`get_signals`, `get_events`, `sql_query`) work fine on the standard read-only key.
+>
+> **To actually read alert state**, the end user must configure a **personal Seq API key that
+> carries more than read-only rights** — i.e. a Seq account/role permitted to read alerts — and
+> point the connector at that key instead of the shared read-only one (set `SEQ_API_KEY` to the
+> personal key on a local/standalone install; for the hosted plugin this has to be arranged with
+> whoever operates the hosted gatekeeper). Until that is in place, treat alert state as
+> unavailable and derive the picture from `get_events` / `sql_query` instead.
 
 ## Setup (for users installing this skill)
 
@@ -48,8 +66,8 @@ Follow this sequence — don't jump straight to events without first knowing wha
 
 ### Step 1 — Orient
 Always start here:
-1. `seq-prod:get_alert_state` → any currently firing alerts?
-2. `seq-prod:get_signals` → what named filters exist? Note their IDs — they're your shortcuts.
+1. `seq-prod:get_signals` → what named filters exist? Note their IDs — they're your shortcuts.
+2. `seq-prod:get_alert_state` → any currently firing alerts? **Expect this to return `403 Forbidden` on the shared read-only key** (see the caveat above) — if it does, that's normal, skip it and move on; only when it succeeds (a personal key with alert rights is configured) should you use it. Don't retry the 403.
 
 **Scoping to a customer / office (WebMed prod).** Each customer (legekontor / office) is a distinct tenant. Every event carries an **`Environment`** property whose value is a short tenant **slug**. In production each tenant also has a saved signal titled **`WebMed - {Name}`** using the display name. **The slug is an assigned identifier — often an abbreviation — and is NOT derivable from the display name. Never guess it:**
 
@@ -200,11 +218,11 @@ Keep it actionable — the person reading this may be mid-incident. Lead with wh
 ## Common Scenarios
 
 **Morning health check**
-→ `seq-prod:get_alert_state` + `seq-prod:get_events` with `range: "8h"`, `filter: @Level in ['Error', 'Fatal']`
+→ `seq-prod:get_events` with `range: "8h"`, `filter: @Level in ['Error', 'Fatal']` (try `seq-prod:get_alert_state` too, but it's normally `403` on the shared key — see the caveat above)
 → Note any services with unusually high error counts compared to normal
 
 **Active incident**
-→ Start with `seq-prod:get_alert_state` to confirm scope, then zoom into the affected service
+→ If `seq-prod:get_alert_state` is available (personal key with alert rights), use it to confirm scope; otherwise (the usual `403` case) go straight to `seq-prod:get_events` / `seq-prod:sql_query` on the affected service and a broad `@Level in ['Error','Fatal']` sweep
 → Look for the first occurrence of the error — when did it start?
 → Check if it correlates with a deployment or config change
 
