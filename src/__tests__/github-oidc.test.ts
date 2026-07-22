@@ -158,6 +158,30 @@ describe('createGitHubOidcVerifier', () => {
     expect(await verifier(cfg)(token)).not.toBeNull();
   });
 
+  it('matches repository case-insensitively (mixed-case allow-list vs token claim)', async () => {
+    // GitHub repo identities are case-insensitive: an UPPERCASE allow-list must
+    // still accept a token whose repository claim is lowercased (and vice-versa).
+    const cfg: GitHubOidcConfig = { ...CONFIG, allowedRepositories: ['WEBMED-EPJ/EPJ'] };
+    const token = await signToken({ repository: 'webmed-epj/epj' });
+    expect(await verifier(cfg)(token)).not.toBeNull();
+  });
+
+  it('matches repository_owner case-insensitively', async () => {
+    const cfg: GitHubOidcConfig = { ...CONFIG, allowedRepositories: [], allowedOwners: ['webmed-epj'] };
+    const token = await signToken({ repository_owner: 'WebMed-EPJ' });
+    expect(await verifier(cfg)(token)).not.toBeNull();
+  });
+
+  it('keeps subject globs case-sensitive (git refs are case-sensitive)', async () => {
+    const cfg: GitHubOidcConfig = {
+      ...CONFIG,
+      allowedRepositories: [],
+      allowedSubjects: ['repo:WebMed-EPJ/epj:ref:refs/heads/main'],
+    };
+    const token = await signToken({ sub: 'repo:WebMed-EPJ/epj:ref:refs/heads/MAIN', repository: 'x/y', repository_owner: 'x' });
+    expect(await verifier(cfg)(token)).toBeNull();
+  });
+
   it('rejects a wrong audience', async () => {
     const token = await signToken({ aud: 'https://some-other-resource.example' });
     expect(await verifier()(token)).toBeNull();

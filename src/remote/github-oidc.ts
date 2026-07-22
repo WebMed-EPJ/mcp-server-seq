@@ -139,8 +139,12 @@ export function createGitHubOidcVerifier(
         ? () => keyInput
         : createRemoteJWKSet(jwksUrlForIssuer(config.issuer));
 
-  const repos = new Set(config.allowedRepositories);
-  const owners = new Set(config.allowedOwners);
+  // GitHub `repository`/`repository_owner` identities are effectively
+  // case-insensitive, so match them lowercased — an operator pasting a differently
+  // cased env value must not lock out a legitimate caller. `sub` is NOT lowercased:
+  // it embeds git refs (e.g. `…:ref:refs/heads/Feature`), which ARE case-sensitive.
+  const repos = new Set(config.allowedRepositories.map((r) => r.toLowerCase()));
+  const owners = new Set(config.allowedOwners.map((o) => o.toLowerCase()));
   const subjectMatchers = config.allowedSubjects.map(globToRegExp);
   const allowListEmpty = githubOidcAllowListEmpty(config);
 
@@ -192,8 +196,8 @@ export function createGitHubOidcVerifier(
 
     // The security gate: accept only if a configured allow-list rule matches.
     const matches =
-      (repository !== "" && repos.has(repository)) ||
-      (repositoryOwner !== "" && owners.has(repositoryOwner)) ||
+      (repository !== "" && repos.has(repository.toLowerCase())) ||
+      (repositoryOwner !== "" && owners.has(repositoryOwner.toLowerCase())) ||
       (sub !== "" && subjectMatchers.some((re) => re.test(sub)));
 
     if (!matches) {

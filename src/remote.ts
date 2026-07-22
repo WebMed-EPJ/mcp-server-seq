@@ -211,7 +211,9 @@ async function main(): Promise<void> {
         port,
         publicBaseUrl: config.publicBaseUrl,
         trustProxyHops,
-        auth: "Microsoft Entra OAuth",
+        // The always-on interactive path. The two machine paths below are opt-in
+        // (booleans), so the log reflects every way a caller can authenticate.
+        interactiveAuth: "Microsoft Entra OAuth",
         serviceAuth: Boolean(serviceVerifier),
         githubOidc: Boolean(githubVerifier),
         tenantId: config.entra.tenantId,
