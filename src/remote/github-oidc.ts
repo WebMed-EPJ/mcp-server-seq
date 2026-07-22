@@ -39,9 +39,14 @@ export interface GitHubOidcConfig {
    * for any other audience is rejected.
    */
   audience: string;
-  /** Allowed `repository` claims, e.g. `WebMed-EPJ/epj`. */
+  /** Allowed `repository` claims, e.g. `WebMed-EPJ/epj`. Tightest scope. */
   allowedRepositories: string[];
-  /** Allowed `repository_owner` claims, e.g. `WebMed-EPJ`. */
+  /**
+   * Allowed `repository_owner` claims, e.g. `WebMed-EPJ`. NOTE: this trusts
+   * EVERY repository under that owner — a much broader boundary than
+   * `allowedRepositories` / `allowedSubjects`. Prefer repo- or subject-level
+   * allow-listing; reserve owner-level for when every repo in the org is trusted.
+   */
   allowedOwners: string[];
   /** Allowed `sub` patterns (glob: `*`/`?`), e.g. `repo:WebMed-EPJ/epj:*`. */
   allowedSubjects: string[];

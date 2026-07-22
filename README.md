@@ -228,7 +228,7 @@ In addition to `SEQ_BASE_URL` / `SEQ_API_KEY` (the remote server **requires**
 | `GITHUB_OIDC_ENABLED` | no | **Opt-in switch for GitHub Actions OIDC auth** (keyless). `true`/`1`/`yes`/`on` to enable. Default `false`. |
 | `GITHUB_OIDC_AUDIENCE` | if OIDC | Expected token `aud`, enforced strictly. Must equal what the caller sends (gh-aw's `auth.audience` defaults to the server URL — set both to e.g. `https://seq-mcp.public.webmedepj.no`). Required when `GITHUB_OIDC_ENABLED` (fail-closed). |
 | `GITHUB_OIDC_ALLOWED_REPOSITORIES` | no | Comma/space-separated `repository` claims allowed, e.g. `WebMed-EPJ/epj`. |
-| `GITHUB_OIDC_ALLOWED_OWNERS` | no | Comma/space-separated `repository_owner` claims allowed, e.g. `WebMed-EPJ`. |
+| `GITHUB_OIDC_ALLOWED_OWNERS` | no | Comma/space-separated `repository_owner` claims allowed, e.g. `WebMed-EPJ`. **Broad:** this trusts *every* repository under that owner — prefer `GITHUB_OIDC_ALLOWED_REPOSITORIES` / `_SUBJECTS` as the tighter-scoped default, and reserve owner-level for when the whole org is trusted. |
 | `GITHUB_OIDC_ALLOWED_SUBJECTS` | no | Comma/space-separated `sub` glob patterns (`*`/`?`), e.g. `repo:WebMed-EPJ/epj:*`. |
 | `GITHUB_OIDC_ISSUER` | no | Override the expected issuer (default `https://token.actions.githubusercontent.com`; for GHES later). |
 
