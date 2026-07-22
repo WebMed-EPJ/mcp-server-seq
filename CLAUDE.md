@@ -29,6 +29,14 @@ Requires Node.js >= 20 (see `engines` in package.json).
   stderr-only `src/logger.ts`. Fails closed without `REMOTE_PUBLIC_URL`/`TENANT_ID`/`CLIENT_ID`/
   `CLIENT_SECRET`/`SEQ_API_KEY`. Endpoints: `/healthz` (unauth), OAuth metadata/`/authorize`/`/token`/
   `/revoke`/`/register`, `/callback`, `/mcp` (bearer; POST only, GET/DELETE → 405).
+  The `/mcp` bearer check is **dual-issuer**: `verifyAccessToken` routes each token by `iss` —
+  besides interactive Entra users it accepts two opt-in machine paths, each a `(token) => AuthInfo|null`
+  verifier tried before the user store. `src/remote/service-auth.ts` validates **Entra app-only**
+  (client-credentials) tokens (opt-in via `ENTRA_ALLOWED_CLIENT_IDS`); `src/remote/github-oidc.ts`
+  validates **GitHub Actions OIDC** tokens for keyless gh-aw automation (opt-in via `GITHUB_OIDC_ENABLED`
+  + `GITHUB_OIDC_AUDIENCE` + a `GITHUB_OIDC_ALLOWED_REPOSITORIES`/`_OWNERS`/`_SUBJECTS` allow-list;
+  signature via GitHub JWKS with `jose`, strict `aud`, default-deny). Both self-gate on their issuer
+  so a token for one path never disturbs the others. Deploy note: `docs/github-oidc-deployment.md`.
 - **Dependency split:** `express` + `@azure/msal-node` are runtime deps used **only** by `remote.ts`.
   Because `seq-server.ts` → `server.ts` never imports them, the esbuild stdio bundle stays free of
   them. The Docker image compiles `src/` with `tsc` (`build:server`) and ships prod `node_modules`

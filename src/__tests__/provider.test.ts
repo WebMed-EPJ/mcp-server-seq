@@ -274,3 +274,62 @@ describe('verifyAccessToken: serviceVerifier branch', () => {
     expect(caught).toBeInstanceOf(InvalidTokenError);
   });
 });
+
+describe('verifyAccessToken: dual-issuer routing (githubVerifier branch)', () => {
+  const ghInfo = {
+    token: 'gh-token',
+    clientId: 'github:WebMed-EPJ/epj',
+    scopes: [],
+    expiresAt: 9999999999,
+    extra: { github: true, homeAccountId: 'github:repo:WebMed-EPJ/epj:ref' },
+  };
+
+  it('returns the githubVerifier result and does NOT consult service auth or the store', async () => {
+    let serviceConsulted = false;
+    let storeConsulted = false;
+    const provider = new EntraOAuthProvider({
+      entra: makeEntraConfig(),
+      publicBaseUrl: PUBLIC_URL,
+      githubVerifier: async () => ghInfo,
+      serviceVerifier: async () => {
+        serviceConsulted = true;
+        return null;
+      },
+    });
+    const store = provider.clientsStore as unknown as { verifyAccess: (t: string) => unknown };
+    const orig = store.verifyAccess.bind(store);
+    store.verifyAccess = (t: string) => {
+      storeConsulted = true;
+      return orig(t);
+    };
+
+    await expect(provider.verifyAccessToken('a-github-token')).resolves.toEqual(ghInfo);
+    // GitHub path short-circuits — neither the Entra service verifier nor the store runs.
+    expect(serviceConsulted).toBe(false);
+    expect(storeConsulted).toBe(false);
+  });
+
+  it('falls through to the serviceVerifier when the githubVerifier returns null (non-GitHub token)', async () => {
+    let serviceConsulted = false;
+    const provider = new EntraOAuthProvider({
+      entra: makeEntraConfig(),
+      publicBaseUrl: PUBLIC_URL,
+      githubVerifier: async () => null,
+      serviceVerifier: async () => {
+        serviceConsulted = true;
+        return null;
+      },
+    });
+    await expect(provider.verifyAccessToken('unknown-token')).rejects.toBeInstanceOf(InvalidTokenError);
+    expect(serviceConsulted).toBe(true);
+  });
+
+  it('rejects GitHub tokens when no githubVerifier is wired (feature flag off)', async () => {
+    // With GITHUB_OIDC_ENABLED unset, remote.ts passes no githubVerifier, so a
+    // GitHub bearer is just an unknown token → InvalidTokenError (401).
+    const provider = new EntraOAuthProvider({ entra: makeEntraConfig(), publicBaseUrl: PUBLIC_URL });
+    await expect(
+      provider.verifyAccessToken('a.github.token'),
+    ).rejects.toBeInstanceOf(InvalidTokenError);
+  });
+});
