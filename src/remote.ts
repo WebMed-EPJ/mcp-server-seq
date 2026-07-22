@@ -40,6 +40,7 @@ import { accessLogMiddleware, errorFields, loggerFromEnv } from "./logger.js";
 import { createSeqServer, SEQ_API_KEY, SEQ_BASE_URL } from "./server.js";
 import { EntraOAuthProvider } from "./remote/provider.js";
 import { createServiceTokenVerifier } from "./remote/service-auth.js";
+import { createGitHubOidcVerifier, githubOidcAllowListEmpty } from "./remote/github-oidc.js";
 
 const logger = loggerFromEnv();
 
@@ -95,7 +96,29 @@ async function main(): Promise<void> {
       allowedClients: config.serviceAuth.allowedClientIds.length,
     });
   }
-  const provider = new EntraOAuthProvider({ entra: config.entra, publicBaseUrl: config.publicBaseUrl, logger, serviceVerifier });
+  const githubVerifier = config.githubOidc
+    ? createGitHubOidcVerifier(config.githubOidc, undefined, logger)
+    : undefined;
+  if (config.githubOidc) {
+    logger.info("GitHub Actions OIDC (keyless automation) auth enabled", {
+      issuer: config.githubOidc.issuer,
+      audience: config.githubOidc.audience,
+      allowedRepositories: config.githubOidc.allowedRepositories.length,
+      allowedOwners: config.githubOidc.allowedOwners.length,
+      allowedSubjects: config.githubOidc.allowedSubjects.length,
+    });
+    // Fail-closed: enabled with no allow-list means every GitHub token is rejected.
+    // Warn loudly so a misconfigured deployment is obvious in the logs.
+    if (githubOidcAllowListEmpty(config.githubOidc)) {
+      logger.warn(
+        "GitHub OIDC is enabled but NO allow-list is configured " +
+          "(GITHUB_OIDC_ALLOWED_REPOSITORIES / GITHUB_OIDC_ALLOWED_OWNERS / GITHUB_OIDC_ALLOWED_SUBJECTS are all empty). " +
+          "ALL GitHub tokens will be rejected (fail-closed).",
+      );
+    }
+  }
+
+  const provider = new EntraOAuthProvider({ entra: config.entra, publicBaseUrl: config.publicBaseUrl, logger, serviceVerifier, githubVerifier });
 
   // Evict expired OAuth state every minute so abandoned flows / unused tokens
   // can't accumulate (lazy expiry alone never reclaims them). unref() so the
@@ -189,6 +212,8 @@ async function main(): Promise<void> {
         publicBaseUrl: config.publicBaseUrl,
         trustProxyHops,
         auth: "Microsoft Entra OAuth",
+        serviceAuth: Boolean(serviceVerifier),
+        githubOidc: Boolean(githubVerifier),
         tenantId: config.entra.tenantId,
         seqBaseUrl: SEQ_BASE_URL,
       });

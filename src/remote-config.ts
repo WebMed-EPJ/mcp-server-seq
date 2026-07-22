@@ -11,6 +11,7 @@
  */
 import type { EntraConfig } from "./remote/provider.js";
 import { loadServiceAuthConfig, type ServiceAuthConfig } from "./remote/service-auth.js";
+import { loadGitHubOidcConfig, type GitHubOidcConfig } from "./remote/github-oidc.js";
 
 export interface RemoteConfig {
   entra: EntraConfig;
@@ -22,6 +23,12 @@ export interface RemoteConfig {
    * null = disabled (opt-in via ENTRA_ALLOWED_CLIENT_IDS). See remote/service-auth.ts.
    */
   serviceAuth: ServiceAuthConfig | null;
+  /**
+   * GitHub Actions OIDC auth (keyless tokens presented by unattended GitHub
+   * Actions / gh-aw runs). null = disabled (opt-in via GITHUB_OIDC_ENABLED).
+   * See remote/github-oidc.ts.
+   */
+  githubOidc: GitHubOidcConfig | null;
 }
 
 /**
@@ -72,6 +79,7 @@ export function loadRemoteConfig(): RemoteConfig {
   };
 
   const serviceAuth = loadServiceAuthConfig(entra.tenantId);
+  const githubOidc = loadGitHubOidcConfig();
 
-  return { entra, publicBaseUrl, serviceAuth };
+  return { entra, publicBaseUrl, serviceAuth, githubOidc };
 }

@@ -182,11 +182,23 @@ locally per user.
 
 ### Authentication
 
-Access to the `/mcp` endpoint is a full **OAuth 2.1** flow (dynamic client
-registration + PKCE) federated to **Microsoft Entra** — the same sign-in model
-as the WebMed Lime/m365 connectors. Sign-in only **authenticates** the caller;
-the Seq API key stays **global and server-side** (there is no per-user Seq
-token). Every authenticated user is served by the same Seq client, and every log
+Access to the `/mcp` endpoint is validated per bearer token by a **dual-issuer**
+gate, so one endpoint serves both interactive users and unattended automation:
+
+- **Microsoft Entra OAuth 2.1** (dynamic client registration + PKCE) — the same
+  sign-in model as the WebMed Lime/m365 connectors, for interactive clients
+  (claude.ai). This is the default and only path unless the others are opted in.
+- **GitHub Actions OIDC** — a keyless path for unattended GitHub Actions / gh-aw
+  runs, which present a GitHub Actions OIDC JWT directly as the bearer (see
+  [GitHub Actions OIDC](#github-actions-oidc-auth-keyless-automation) below).
+- **Entra app-only (client-credentials)** — for other headless callers such as
+  Claude-in-Slack (see [Machine-to-machine auth](#machine-to-machine-auth-headless-callers)).
+
+Each incoming bearer is routed by its `iss`: a GitHub-issued token is validated
+against GitHub's JWKS + claim allow-list, and everything else falls through to
+the Entra paths. In every case sign-in only **authenticates** the caller; the
+Seq API key stays **global and server-side** (there is no per-user Seq token).
+Every authenticated caller is served by the same Seq client, and every log
 response is still PII-redacted (see [Privacy](#privacy--pii-redaction)) before it
 leaves the process.
 
@@ -213,6 +225,16 @@ In addition to `SEQ_BASE_URL` / `SEQ_API_KEY` (the remote server **requires**
 | `ENTRA_ALLOWED_CLIENT_IDS` | no | **Opt-in switch for machine-to-machine auth.** Comma/space-separated Entra app (client) IDs allowed to call `/mcp` with an app-only token (the token `azp`/`appid`). Unset = interactive-user login only. |
 | `ENTRA_AUDIENCE` | if M2M | Acceptable token audience(s) — set **both** this API app's Application ID URI (`api://…`) and its client-id GUID. Required when `ENTRA_ALLOWED_CLIENT_IDS` is set (fail-closed). |
 | `ENTRA_REQUIRED_ROLE` | no | App role the token must carry in `roles`. Default `Connector.Access`. |
+| `GITHUB_OIDC_ENABLED` | no | **Opt-in switch for GitHub Actions OIDC auth** (keyless). `true`/`1`/`yes`/`on` to enable. Default `false`. |
+| `GITHUB_OIDC_AUDIENCE` | if OIDC | Expected token `aud`, enforced strictly. Must equal what the caller sends (gh-aw's `auth.audience` defaults to the server URL — set both to e.g. `https://seq-mcp.public.webmedepj.no`). Required when `GITHUB_OIDC_ENABLED` (fail-closed). |
+| `GITHUB_OIDC_ALLOWED_REPOSITORIES` | no | Comma/space-separated `repository` claims allowed, e.g. `WebMed-EPJ/epj`. |
+| `GITHUB_OIDC_ALLOWED_OWNERS` | no | Comma/space-separated `repository_owner` claims allowed, e.g. `WebMed-EPJ`. |
+| `GITHUB_OIDC_ALLOWED_SUBJECTS` | no | Comma/space-separated `sub` glob patterns (`*`/`?`), e.g. `repo:WebMed-EPJ/epj:*`. |
+| `GITHUB_OIDC_ISSUER` | no | Override the expected issuer (default `https://token.actions.githubusercontent.com`; for GHES later). |
+
+> **Default-deny:** when `GITHUB_OIDC_ENABLED` is true but **none** of the three
+> allow-lists is set, every GitHub token is rejected (fail-closed) and a startup
+> warning is logged. Configure at least one of repositories / owners / subjects.
 
 Register the Entra app as a **confidential** client with a **Web** redirect URI
 of `<REMOTE_PUBLIC_URL>/callback` and a client secret. See `.env.example` for a
@@ -233,6 +255,45 @@ audience, the required app role, and an `azp`/`appid` allow-list) in
 `ENTRA_ALLOWED_CLIENT_IDS` (+ `ENTRA_AUDIENCE`); leave unset for interactive-only.
 Every response stays PII/fnr-redacted regardless of caller. Prerequisites on the
 API app: an **Application ID URI** and an **app role** the caller app is assigned.
+
+### GitHub Actions OIDC auth (keyless automation)
+
+Unattended **GitHub Actions** workflows — specifically our **GitHub Agentic
+Workflows (gh-aw)** runs — can't run the interactive browser login and don't hold
+an Entra app secret. Instead, gh-aw's MCP gateway obtains a **GitHub Actions OIDC
+token** (a short-lived JWT minted by GitHub for the running workflow) and sends it
+**verbatim** as the `/mcp` bearer. There is no Entra exchange, so this server
+validates the raw GitHub token itself, as a resource server:
+
+1. **Signature** — verified against GitHub's JWKS (`<issuer>/.well-known/jwks`,
+   discovered from the OIDC issuer), cached with key-rotation handling (via
+   `jose`'s `createRemoteJWKSet`). `alg` is pinned to `RS256`; an unsigned /
+   `alg: none` token can never validate.
+2. **Standard claims** — `iss` must equal the configured GitHub issuer exactly;
+   `exp`/`nbf`/`iat` must be valid (60s clock skew); and `aud` must equal
+   `GITHUB_OIDC_AUDIENCE` **exactly** — a token minted for a different audience is
+   rejected.
+3. **Claim allow-list** (the security gate) — the token is accepted only if its
+   `repository` ∈ `GITHUB_OIDC_ALLOWED_REPOSITORIES`, **or** its
+   `repository_owner` ∈ `GITHUB_OIDC_ALLOWED_OWNERS`, **or** its `sub` matches a
+   glob in `GITHUB_OIDC_ALLOWED_SUBJECTS`. Anything else is rejected (`401`). With
+   **no** allow-list configured the path default-denies (fail-closed).
+
+Enable it with `GITHUB_OIDC_ENABLED=true` (+ `GITHUB_OIDC_AUDIENCE` and at least
+one allow-list). Implemented in `src/remote/github-oidc.ts`; it mints no secret,
+never logs the token, and every response stays PII/fnr-redacted regardless of
+caller. Full tokens are never logged (only PII-free `repository`/`owner`/`sub`
+identifiers on a rejection, for triage).
+
+**How to call this from GitHub Actions / gh-aw.** In the workflow, grant the job
+`permissions: { id-token: write }` so GitHub will mint an OIDC token, and point
+the MCP client at the hosted URL with the audience set to match
+`GITHUB_OIDC_AUDIENCE`. For gh-aw, `auth.audience` defaults to the MCP server
+**url**, so keep both sides equal — e.g. server `GITHUB_OIDC_AUDIENCE` and gh-aw
+`auth.audience` both set to `https://seq-mcp.public.webmedepj.no`. gh-aw acquires
+the OIDC JWT for that audience and sends it as `Authorization: Bearer <jwt>`;
+this server validates issuer + audience + the repository/owner/subject allow-list
+before serving the shared, redacting Seq tools.
 
 ### Build & run with Docker
 
