@@ -7,7 +7,7 @@ description: >
   being broken or slow, log queries, or asks to "check the system". Also use for
   morning health checks, deployment follow-ups, or any time you'd naturally want
   to look at structured logs to answer a question.
-compatibility: Requires the mcp-server-seq MCP server. Install with: claude mcp add --transport stdio --env SEQ_BASE_URL=<url> --env SEQ_API_KEY=<key> seq -- npx -y mcp-seq
+compatibility: "Requires the mcp-server-seq MCP server. Install with: claude mcp add --transport stdio --env SEQ_BASE_URL=<url> --env SEQ_API_KEY=<key> seq -- npx -y mcp-seq"
 ---
 
 # Seq Operations
