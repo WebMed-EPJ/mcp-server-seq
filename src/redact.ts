@@ -1,3 +1,4 @@
+import { createHash, randomBytes } from 'node:crypto';
 import { OpenRedaction, type PIIPattern } from 'openredaction';
 
 /**
@@ -22,6 +23,11 @@ import { OpenRedaction, type PIIPattern } from 'openredaction';
  *    only masked when part of a multi-token name (see redactNorwegianNames)
  *  - Email addresses (library built-in; reserved example/test domains such
  *    as example.com are intentionally treated as non-PII)
+ *  - Pseudonymous patient identifiers (`PatientId` and friends) — masked by
+ *    the PROPERTY NAME they are logged under, not by the shape of the value,
+ *    because they are GUIDs and indistinguishable from the correlation and
+ *    request ids that must stay readable. See
+ *    DEFAULT_PSEUDONYM_ID_PROPERTIES and redactDeep
  */
 
 /**
@@ -285,6 +291,494 @@ function redactNorwegianNames(text: string): string {
   return out + text.slice(cursor);
 }
 
+/**
+ * Property names whose values are treated as pseudonymous identifiers for a
+ * data subject and are therefore masked wholesale, regardless of the value's
+ * form. Compared lower-cased.
+ *
+ * These identifiers are GUIDs in WebMed's logs (`PatientId` is a canonical
+ * 36-character GUID string), and a GUID cannot be recognised by its VALUE:
+ * correlation ids, request ids, tenant ids and signal ids look exactly the
+ * same, and masking every GUID in a log response would make the logs useless
+ * for debugging. So the identifier is recognised by the NAME it is logged
+ * under — see {@link PSEUDONYM_NAMED_VALUE_KEYS} and
+ * {@link namedIdentifierPattern} for the places a name can appear.
+ *
+ * A pseudonymous identifier is still personal data under GDPR/Personvern
+ * (recital 26): it singles out one patient, and anyone with access to the EPJ
+ * database can re-identify them. Masking it means the identifier is never
+ * transferred out of this process, while the deterministic placeholder keeps a
+ * debugging session able to see that two events concern the same patient.
+ *
+ * Deliberately NOT included by default: `UserId`, `DoctorId` and
+ * `PractitionerId`. Those identify WebMed staff rather than the data subject,
+ * they are load-bearing for everyday debugging, and `DoctorId` is frequently a
+ * small integer whose masking would be far more destructive (see
+ * {@link isDistinctiveIdValue}). Add them per deployment via
+ * `SEQ_PSEUDONYM_ID_PROPERTIES` if a given installation needs them.
+ */
+const DEFAULT_PSEUDONYM_ID_PROPERTIES: readonly string[] = [
+  'patientid',
+  'patientguid',
+  'patientkey',
+  'patientuid',
+  // Norwegian spellings, in case a service logs them that way.
+  'pasientid',
+  'pasientguid',
+];
+
+/**
+ * Sibling keys naming, and holding the value of, a name/value pair. Seq's
+ * `/api/events` returns event properties as `{ Name, Value }` objects and
+ * message-template tokens as `{ PropertyName, FormattedValue, … }`, so the
+ * identifier's name is not the object key it is stored under — it is the
+ * *value* of a `Name` / `PropertyName` member. Both shapes are handled (as well
+ * as the plain `{ PatientId: … }` object form), because a payload shape that
+ * slips through would silently ship the identifier.
+ */
+const PSEUDONYM_NAME_KEYS: readonly string[] = ['name', 'propertyname'];
+const PSEUDONYM_NAMED_VALUE_KEYS: readonly string[] = ['value', 'formattedvalue'];
+
+/** Canonical GUID form, with or without wrapping braces. */
+const GUID_SHAPE = /^\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}?$/i;
+
+/**
+ * Longest identifier value we will hash and search for in free text. A value
+ * longer than this is not an identifier, and building a regex from it would be
+ * a needless cost on every string in the response.
+ */
+const MAX_ID_VALUE_LENGTH = 256;
+
+let idPropertiesCache: { raw: string; names: ReadonlySet<string> } | null = null;
+
+/**
+ * The active set of pseudonymous-identifier property names (lower-cased).
+ *
+ * `SEQ_PSEUDONYM_ID_PROPERTIES` (comma/whitespace separated) EXTENDS the
+ * defaults; it cannot shrink them. Same rule as the other privacy lists in
+ * WebMed's connectors: an operator may widen masking for a deployment, but a
+ * misconfigured env var must never be able to switch off masking of the patient
+ * identifier. (Redaction as a whole is still opt-out via
+ * `SEQ_REDACTION_ENABLED=false`, which is an explicit, documented choice.)
+ *
+ * Memoised on the raw env value so a change is picked up without a restart —
+ * and, more practically, so tests can set it per case.
+ *
+ * @returns Lower-cased property names whose values are pseudonymous identifiers
+ */
+function pseudonymIdProperties(): ReadonlySet<string> {
+  const raw = process.env.SEQ_PSEUDONYM_ID_PROPERTIES ?? '';
+  if (idPropertiesCache && idPropertiesCache.raw === raw) return idPropertiesCache.names;
+  const names = new Set(DEFAULT_PSEUDONYM_ID_PROPERTIES);
+  for (const extra of raw.split(/[,\s]+/)) {
+    const trimmed = extra.trim().toLowerCase();
+    if (trimmed) names.add(trimmed);
+  }
+  idPropertiesCache = { raw, names };
+  return names;
+}
+
+let saltCache: { raw: string | undefined; salt: string } | null = null;
+
+/**
+ * Salt mixed into every identifier digest.
+ *
+ * Default is a random per-process value. That matters: an UNSALTED digest of a
+ * patient GUID is itself a stable pseudonym derived from the identifier, so
+ * anyone holding a candidate GUID could hash it and confirm that the patient
+ * appears in an exported log excerpt. A per-process salt keeps the placeholder
+ * correlatable where it needs to be — within a response, and for the lifetime
+ * of the process — while making that offline confirmation impossible.
+ *
+ * Set `SEQ_PSEUDONYM_SALT` to a fixed secret to trade that away for stability
+ * across restarts and across replicas of the hosted server (useful when one
+ * investigation spans several tool calls that may be served by different
+ * replicas). Treat such a value as a secret: it is what makes the digests
+ * unverifiable.
+ *
+ * @returns The salt string in use
+ */
+function pseudonymSalt(): string {
+  const raw = process.env.SEQ_PSEUDONYM_SALT;
+  if (saltCache && saltCache.raw === raw) return saltCache.salt;
+  const salt = raw && raw.length > 0 ? raw : randomBytes(32).toString('hex');
+  saltCache = { raw, salt };
+  return salt;
+}
+
+/**
+ * Normalise an identifier before hashing so the same identifier written
+ * differently still maps to the same placeholder. Only GUIDs are normalised
+ * (case and wrapping braces are not significant in a GUID); every other value
+ * is hashed verbatim, since for an opaque identifier a case difference may be
+ * a real difference.
+ *
+ * @param value - The raw identifier value
+ * @returns The string to hash
+ */
+function pseudonymKey(value: string): string {
+  return GUID_SHAPE.test(value) ? value.replace(/[{}]/g, '').toLowerCase() : value;
+}
+
+/**
+ * Deterministic placeholder for a pseudonymous identifier: the same value
+ * always yields the same placeholder within a response (and within the life of
+ * the process — see {@link pseudonymSalt}), so a reader can still tell that two
+ * log events concern the same patient without the identifier being transferred.
+ *
+ * The digest is 8 hex characters (~4.3 billion buckets), which keeps the
+ * placeholder short enough to read in a log while making a collision between
+ * two patients in one investigation negligible. The `_` before the digest is
+ * load-bearing: it makes the digits a continuation of a word, so the phone and
+ * fødselsnummer patterns (both anchored on `\b`) can never match inside a
+ * placeholder we just inserted.
+ *
+ * @param value - The identifier value to mask
+ * @returns A placeholder of the form `[PSEUDONYM_a1b2c3d4]`
+ */
+export function pseudonymPlaceholder(value: string): string {
+  const digest = createHash('sha256')
+    .update(pseudonymSalt())
+    // A NUL byte separates salt from value: neither a configured salt nor a Seq
+    // property value contains one, so the boundary cannot be shifted to make
+    // two different (salt, value) pairs hash alike. Written as an escape — a
+    // literal control character has no place in source.
+    .update('\u0000')
+    .update(pseudonymKey(value))
+    .digest('hex')
+    .slice(0, 8);
+  return `[PSEUDONYM_${digest}]`;
+}
+
+/**
+ * Mask any value found under a pseudonymous-identifier property name.
+ *
+ * Fail-closed: anything that is not null/undefined is masked, including a
+ * number (an integer identifier), a boolean, or — unexpected but possible — a
+ * whole object or array, which is masked as one placeholder over its JSON form
+ * rather than recursed into. A property called `PatientId` must not ship its
+ * contents just because it turned out not to be a plain string.
+ *
+ * @param value - The value stored under the identifier property
+ * @returns The placeholder, or the value unchanged when it is null/undefined
+ */
+function maskIdentifierValue(value: unknown): unknown {
+  if (value === null || value === undefined) return value;
+  if (typeof value === 'string') return value === '' ? value : pseudonymPlaceholder(value);
+  if (typeof value === 'object') return pseudonymPlaceholder(JSON.stringify(value) ?? '');
+  return pseudonymPlaceholder(String(value));
+}
+
+/**
+ * Whether an identifier value is distinctive enough to be searched for — and
+ * replaced — everywhere else in the same response (pass C in
+ * {@link redactDeep}).
+ *
+ * A GUID, or a long identifier-shaped token, cannot plausibly collide with
+ * unrelated log text. A short or purely numeric one can: an integer patient id
+ * such as `4711` also occurs as a duration, a status count or a port, and
+ * blanket-replacing it would corrupt the very logs the tool exists to explain.
+ * Such values are still masked where they appear under their property name
+ * (pass A) or next to it (pass B) — the free-text sweep is simply not safe for
+ * them. This limitation is documented in the README.
+ *
+ * @param value - A collected identifier value
+ * @returns true when the value may be replaced in arbitrary free text
+ */
+function isDistinctiveIdValue(value: string): boolean {
+  if (value.length > MAX_ID_VALUE_LENGTH) return false;
+  if (GUID_SHAPE.test(value)) return true;
+  return value.length >= 12 && /\d/.test(value) && !/\s/.test(value);
+}
+
+/**
+ * Escape a literal string for use inside a regular expression.
+ *
+ * @param value - The literal to escape
+ * @returns The escaped literal
+ */
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+let namedPatternCache: { key: string; pattern: RegExp } | null = null;
+
+/**
+ * Pattern for an identifier that names itself in free text — `PatientId =
+ * '3fa8…'` in an echoed Seq filter, `PatientId: 3fa8…` in a rendered message,
+ * `PatientId 3fa8…` in a log line. This is the text-level half of the
+ * name-based rule: it needs no prior knowledge of the value, so it also covers
+ * strings that never passed through the structural walk — notably a Seq error
+ * body, which is redacted via {@link redactText} alone.
+ *
+ * The value is taken either from quotes (explicit intent — anything inside is
+ * masked) or as a bare token, which must contain a digit; that requirement is
+ * what stops `PatientId ukjent` from masking the word "ukjent". Every
+ * quantifier is bounded, so the pattern cannot backtrack super-linearly on
+ * hostile log text.
+ *
+ * @returns A global, case-insensitive regex, rebuilt only when the name set
+ *          changes
+ */
+function namedIdentifierPattern(): RegExp {
+  const names = [...pseudonymIdProperties()].sort();
+  const key = names.join(',');
+  if (namedPatternCache && namedPatternCache.key === key) {
+    namedPatternCache.pattern.lastIndex = 0;
+    return namedPatternCache.pattern;
+  }
+  const alternation = names.map(escapeRegExp).join('|');
+  const pattern = new RegExp(
+    // The property name, not itself part of a longer word …
+    `(?<![0-9A-Za-z_])(?:${alternation})(?![0-9A-Za-z_])`
+    // … an optional closing quote, so a raw JSON body (`"PatientId":"3fa8…"`,
+    // which is how a Seq error echoes a filter) is covered as well as a
+    // rendered log line …
+    + `['"]{0,1}`
+    // … then an operator (optionally spaced) or at least one space …
+    + `(?:[ \\t]{0,8}[:=]{1,2}[ \\t]{0,8}|[ \\t]{1,8})`
+    // … then 'quoted' | "quoted" | a bare identifier-ish token.
+    + `(?:'([^'\\r\\n]{1,128})'|"([^"\\r\\n]{1,128})"|([0-9A-Za-z][0-9A-Za-z._:-]{2,127}))`,
+    'gi',
+  );
+  namedPatternCache = { key, pattern };
+  return pattern;
+}
+
+/**
+ * True when a bare (unquoted) token following an identifier name looks like an
+ * identifier rather than an ordinary word. Requiring a digit keeps Norwegian
+ * log prose intact ("PatientId mangler", "PatientId er ukjent").
+ *
+ * @param token - The bare token that followed the property name
+ * @returns true when the token should be treated as an identifier value
+ */
+function isBareIdentifierToken(token: string): boolean {
+  return /\d/.test(token);
+}
+
+/**
+ * The identifier value captured by {@link namedIdentifierPattern}, or undefined
+ * when the match was a property name followed by ordinary prose.
+ *
+ * @param single - Contents of a single-quoted value, if that alternative matched
+ * @param double - Contents of a double-quoted value, if that alternative matched
+ * @param bare - The bare token, if that alternative matched
+ * @returns The identifier value, or undefined
+ */
+function namedIdentifierValue(
+  single?: string,
+  double?: string,
+  bare?: string,
+): string | undefined {
+  const quoted = single ?? double;
+  if (quoted !== undefined) return quoted;
+  if (bare !== undefined && isBareIdentifierToken(bare)) return bare;
+  return undefined;
+}
+
+/**
+ * Replace `<identifier name><separator><value>` occurrences in a string with
+ * the value's placeholder, keeping the name itself (which is schema, not
+ * personal data, and is what makes the redacted line readable).
+ *
+ * @param text - The text to scan
+ * @returns The text with named identifier values masked
+ */
+function redactNamedIdentifiers(text: string): string {
+  return text.replace(
+    namedIdentifierPattern(),
+    (match: string, single?: string, double?: string, bare?: string) => {
+      const value = namedIdentifierValue(single, double, bare);
+      if (value === undefined) return match;
+      // The value is the tail of the match (possibly followed by one closing
+      // quote), so splice at its LAST position. A plain `replace(value, …)`
+      // would hit an earlier coincidental occurrence — the value `tId` in
+      // `PatientId = 'tId'` also occurs inside the property name itself.
+      const at = match.lastIndexOf(value);
+      return match.slice(0, at) + pseudonymPlaceholder(value) + match.slice(at + value.length);
+    },
+  );
+}
+
+/**
+ * The identifier values collected from one response, compiled into a single
+ * alternation so every string in the payload costs one regex pass rather than
+ * one pass per identifier.
+ */
+interface CollectedIdentifiers {
+  /** Null when the response held no distinctive identifier value. */
+  pattern: RegExp | null;
+  /** Lower-cased value → placeholder, resolving a case-insensitive match. */
+  placeholders: ReadonlyMap<string, string>;
+}
+
+/**
+ * Compile the distinctive identifier values of a response for the free-text
+ * sweep (pass C — see {@link redactDeep}).
+ *
+ * Longest first, so an identifier that contains a shorter one is masked as a
+ * whole rather than hollowed out from the inside. Matching is case-insensitive
+ * (a GUID is the same identifier in any casing) and fenced by alphanumeric
+ * lookarounds so a value is never cut out of the middle of a longer token.
+ *
+ * @param values - Raw identifier values collected from the response
+ * @returns The compiled pattern and its placeholder lookup
+ */
+function compileCollectedIdentifiers(values: Iterable<string>): CollectedIdentifiers {
+  const distinctive = [...values]
+    .filter(isDistinctiveIdValue)
+    .sort((a, b) => b.length - a.length);
+  if (distinctive.length === 0) return { pattern: null, placeholders: new Map() };
+
+  const placeholders = new Map<string, string>();
+  for (const value of distinctive) {
+    placeholders.set(value.toLowerCase(), pseudonymPlaceholder(value));
+  }
+  return {
+    pattern: new RegExp(
+      `(?<![0-9A-Za-z])(?:${distinctive.map(escapeRegExp).join('|')})(?![0-9A-Za-z])`,
+      'gi',
+    ),
+    placeholders,
+  };
+}
+
+/**
+ * Replace known identifier values anywhere in a string, so an identifier that
+ * appears in a rendered message WITHOUT naming its property ("Hentet journal
+ * for 3fa85f64-…") is masked with the same placeholder as the structured field
+ * it came from.
+ *
+ * @param text - The text to scan
+ * @param ids - The compiled identifiers of the response
+ * @returns The text with those values masked
+ */
+function redactCollectedIdentifiers(text: string, ids: CollectedIdentifiers): string {
+  if (!ids.pattern || !text) return text;
+  return text.replace(ids.pattern, (match) => ids.placeholders.get(match.toLowerCase()) ?? match);
+}
+
+/**
+ * Column indexes of a Seq `sql_query` rowset that hold a pseudonymous
+ * identifier.
+ *
+ * `/api/data` returns `{ Columns: ["PatientId", "n"], Rows: [["3fa8…", 5]] }`:
+ * the name lives in a *sibling array*, so neither the object-key rule nor the
+ * name/value-pair rule sees it, and `select PatientId, count(*) … group by
+ * PatientId` would otherwise return a plain list of patient identifiers.
+ * Headers are matched on a contained word so a wrapped expression
+ * (`distinct(PatientId)`) is caught too.
+ *
+ * @param value - A candidate object from the response
+ * @returns The masked column indexes, or null when this is not a rowset
+ */
+function pseudonymColumnIndexes(value: Record<string, unknown>): ReadonlySet<number> | null {
+  const columns = value.Columns;
+  if (!Array.isArray(columns) || !Array.isArray(value.Rows)) return null;
+  const names = pseudonymIdProperties();
+  const indexes = new Set<number>();
+  columns.forEach((column, index) => {
+    if (typeof column !== 'string') return;
+    const header = column.toLowerCase();
+    for (const name of names) {
+      if (new RegExp(`(?<![0-9a-z_])${escapeRegExp(name)}(?![0-9a-z_])`).test(header)) {
+        indexes.add(index);
+        return;
+      }
+    }
+  });
+  return indexes.size > 0 ? indexes : null;
+}
+
+/**
+ * Whether this object is a name/value pair for a pseudonymous-identifier
+ * property (Seq's `{ Name, Value }` / `{ PropertyName, FormattedValue }`
+ * shapes).
+ *
+ * @param value - A candidate object from the response
+ * @returns true when the object's value members hold an identifier
+ */
+function isNamedIdentifierPair(value: Record<string, unknown>): boolean {
+  const names = pseudonymIdProperties();
+  for (const [key, member] of Object.entries(value)) {
+    if (!PSEUDONYM_NAME_KEYS.includes(key.toLowerCase())) continue;
+    if (typeof member === 'string' && names.has(member.trim().toLowerCase())) return true;
+  }
+  return false;
+}
+
+/**
+ * Collect the scalar cell values of the identifier columns of a rowset.
+ *
+ * @param rows - The `Rows` member of a Seq rowset
+ * @param columnIndexes - Indexes of the identifier columns
+ * @param out - Set collecting the raw identifier values found
+ */
+function collectRowIdentifiers(
+  rows: readonly unknown[],
+  columnIndexes: ReadonlySet<number>,
+  out: Set<string>,
+): void {
+  for (const row of rows) {
+    if (!Array.isArray(row)) continue;
+    row.forEach((cell, index) => {
+      if (!columnIndexes.has(index)) return;
+      if (typeof cell === 'string') out.add(cell);
+      else if (typeof cell === 'number' || typeof cell === 'bigint') out.add(String(cell));
+    });
+  }
+}
+
+/**
+ * Walk a response and collect every pseudonymous-identifier value in it, from
+ * all four shapes (object key, name/value pair, rowset column, and a string
+ * that names the property inline). The collected values are what pass C —
+ * {@link redactCollectedIdentifiers} — sweeps out of free text, so an
+ * identifier is masked identically wherever it appears in the response, not
+ * only where it was recognisable.
+ *
+ * @param value - The value to walk
+ * @param out - Set collecting the raw identifier values found
+ */
+function collectPseudonymValues(value: unknown, out: Set<string>): void {
+  if (typeof value === 'string') {
+    const pattern = namedIdentifierPattern();
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(value)) !== null) {
+      const found = namedIdentifierValue(match[1], match[2], match[3]);
+      if (found) out.add(found);
+    }
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) collectPseudonymValues(item, out);
+    return;
+  }
+
+  if (value === null || typeof value !== 'object') return;
+
+  const record = value as Record<string, unknown>;
+  const names = pseudonymIdProperties();
+  const columnIndexes = pseudonymColumnIndexes(record);
+  const namedPair = isNamedIdentifierPair(record);
+
+  for (const [key, member] of Object.entries(record)) {
+    const lowerKey = key.toLowerCase();
+    if (names.has(lowerKey) || (namedPair && PSEUDONYM_NAMED_VALUE_KEYS.includes(lowerKey))) {
+      if (typeof member === 'string') out.add(member);
+      else if (typeof member === 'number' || typeof member === 'bigint') out.add(String(member));
+      continue;
+    }
+    if (columnIndexes && key === 'Rows' && Array.isArray(member)) {
+      collectRowIdentifiers(member, columnIndexes, out);
+      continue;
+    }
+    collectPseudonymValues(member, out);
+  }
+}
+
 let detector: OpenRedaction | null = null;
 
 /**
@@ -333,13 +827,19 @@ const SEGMENT_DELIMITERS = /([;|\r\n\t]+)/;
  * exactly. This isolates a poisoned segment so it cannot suppress detection in
  * the rest of the string.
  *
+ * Pseudonymous identifiers that name their own property inline (`PatientId =
+ * '3fa8…'`) are masked FIRST, on the whole string, so this path — which is also
+ * the one a Seq error body takes, with no surrounding structure to inspect —
+ * masks them too. The placeholders it inserts cannot be re-matched by the
+ * patterns that run afterwards (see {@link pseudonymPlaceholder}).
+ *
  * @param text - The text to scan and redact
  * @returns The redacted text (unchanged if redaction is disabled or empty)
  */
 export async function redactText(text: string): Promise<string> {
   if (!isRedactionEnabled() || !text) return text;
 
-  const parts = text.split(SEGMENT_DELIMITERS);
+  const parts = redactNamedIdentifiers(text).split(SEGMENT_DELIMITERS);
   const detector = getDetector();
   // Segments are processed sequentially (not via Promise.all) because the
   // detector is a shared singleton: concurrent in-flight detect() calls could
@@ -363,35 +863,84 @@ export async function redactText(text: string): Promise<string> {
 }
 
 /**
- * Recursively redact personal data from any JSON-serialisable value
- * (objects, arrays, strings). Structure and non-string values are preserved;
- * 11-digit integers are also checked so a fødselsnummer stored as a number
- * is still masked.
+ * Redact the identifier columns of a Seq rowset, cell by cell.
+ *
+ * @param rows - The `Rows` member of a Seq rowset
+ * @param columnIndexes - Indexes of the identifier columns
+ * @param ids - The compiled identifiers of the response
+ * @returns A new rows array with identifier cells masked
+ */
+async function redactRows(
+  rows: readonly unknown[],
+  columnIndexes: ReadonlySet<number>,
+  ids: CollectedIdentifiers,
+): Promise<unknown[]> {
+  const out: unknown[] = [];
+  for (const row of rows) {
+    if (!Array.isArray(row)) {
+      out.push(await redactValue(row, ids));
+      continue;
+    }
+    const cells: unknown[] = [];
+    for (let index = 0; index < row.length; index++) {
+      cells.push(
+        columnIndexes.has(index)
+          ? maskIdentifierValue(row[index])
+          : await redactValue(row[index], ids),
+      );
+    }
+    out.push(cells);
+  }
+  return out;
+}
+
+/**
+ * The recursive worker behind {@link redactDeep}. Split out from the public
+ * entry point so the identifier collection pass runs exactly once, over the
+ * whole response, before any masking begins — the collected values are then
+ * available to every string in the payload, whatever order it is walked in.
  *
  * @param value - The value to redact
+ * @param ids - The compiled identifiers of the response
  * @returns A new value with personal data masked
  */
-export async function redactDeep<T>(value: T): Promise<T> {
-  if (!isRedactionEnabled()) return value;
-
+async function redactValue(value: unknown, ids: CollectedIdentifiers): Promise<unknown> {
   if (typeof value === 'string') {
-    return (await redactText(value)) as unknown as T;
+    // Known identifier values first (pass C), then the pattern-based passes:
+    // the placeholder is inert to those patterns, whereas the reverse order
+    // would let a redaction of the surrounding text break the literal match.
+    return redactText(redactCollectedIdentifiers(value, ids));
   }
 
   if (Array.isArray(value)) {
     // Sequential (not Promise.all) so redactText's detect() calls never run
     // concurrently against the shared singleton detector — see redactText.
     const arr: unknown[] = [];
-    for (const item of value) arr.push(await redactDeep(item));
-    return arr as unknown as T;
+    for (const item of value) arr.push(await redactValue(item, ids));
+    return arr;
   }
 
   if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const names = pseudonymIdProperties();
+    const columnIndexes = pseudonymColumnIndexes(record);
+    const namedPair = isNamedIdentifierPair(record);
     const out: Record<string, unknown> = {};
-    for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
-      out[key] = await redactDeep(val);
+    for (const [key, member] of Object.entries(record)) {
+      const lowerKey = key.toLowerCase();
+      // Pass A: the value sits under a pseudonymous-identifier property name,
+      // either as the object key or as a Seq name/value pair.
+      if (names.has(lowerKey) || (namedPair && PSEUDONYM_NAMED_VALUE_KEYS.includes(lowerKey))) {
+        out[key] = maskIdentifierValue(member);
+        continue;
+      }
+      if (columnIndexes && key === 'Rows' && Array.isArray(member)) {
+        out[key] = await redactRows(member, columnIndexes, ids);
+        continue;
+      }
+      out[key] = await redactValue(member, ids);
     }
-    return out as unknown as T;
+    return out;
   }
 
   // A fødselsnummer may arrive as a numeric value. Stored as a number it
@@ -403,10 +952,45 @@ export async function redactDeep<T>(value: T): Promise<T> {
     const candidate = raw.length === 11 ? raw : raw.length === 10 ? `0${raw}` : null;
     if (candidate) {
       const redacted = await redactText(candidate);
-      if (redacted !== candidate) return redacted as unknown as T;
+      if (redacted !== candidate) return redacted;
     }
     return value;
   }
 
   return value;
+}
+
+/**
+ * Recursively redact personal data from any JSON-serialisable value
+ * (objects, arrays, strings). Structure and non-string values are preserved;
+ * 11-digit integers are also checked so a fødselsnummer stored as a number
+ * is still masked.
+ *
+ * Pseudonymous identifiers (`PatientId` and friends — see
+ * {@link DEFAULT_PSEUDONYM_ID_PROPERTIES}) are masked in three passes, because
+ * the same identifier reaches the caller through three different shapes and
+ * only the first of them carries the property name next to the value:
+ *
+ *  - **A — structural.** A value under an identifier property name is replaced
+ *    wholesale, whether that name is the object key, the `Name`/`PropertyName`
+ *    member of a Seq name/value pair, or a `Columns` header of a `sql_query`
+ *    rowset.
+ *  - **B — name-anchored text.** `PatientId = '3fa8…'` inside a string, handled
+ *    in {@link redactText} so it also covers Seq error bodies.
+ *  - **C — value-anchored text.** Every identifier value found by A or B is
+ *    then swept out of every string in the SAME response, so a rendered message
+ *    that repeats the GUID without naming it is masked with the identical
+ *    placeholder. Only distinctive values take part — see
+ *    {@link isDistinctiveIdValue}.
+ *
+ * @param value - The value to redact
+ * @returns A new value with personal data masked
+ */
+export async function redactDeep<T>(value: T): Promise<T> {
+  if (!isRedactionEnabled()) return value;
+
+  const collected = new Set<string>();
+  collectPseudonymValues(value, collected);
+
+  return (await redactValue(value, compileCollectedIdentifiers(collected))) as T;
 }

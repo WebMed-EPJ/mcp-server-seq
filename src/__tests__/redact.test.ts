@@ -163,3 +163,262 @@ describe('redactDeep', () => {
     expect(String(out.NationalId)).toContain('FNR');
   });
 });
+
+// Synthetic GUIDs. `PatientId` is a canonical 36-character GUID in WebMed's
+// logs, so these stand in for a patient identifier; the CORRELATION one is
+// identical in form and must survive, which is the whole reason masking is
+// keyed on the property name rather than the value.
+const PATIENT_GUID = '3fa85f64-5717-4562-b3fc-2c963f66afa6';
+const OTHER_PATIENT_GUID = '9c1f0b7e-2d34-4a11-8f6d-5b7c8e9a0d12';
+const CORRELATION_GUID = '7d2e4a90-11bc-4f88-9a3e-6c5d4b3a2f10';
+const PLACEHOLDER = /^\[PSEUDONYM_[0-9a-f]{8}\]$/;
+
+/**
+ * All placeholders in a redacted payload, in order of appearance.
+ *
+ * @param value - The redacted value
+ * @returns The `[PSEUDONYM_…]` placeholders found in its JSON form
+ */
+function placeholders(value: unknown): string[] {
+  return JSON.stringify(value)?.match(/\[PSEUDONYM_[0-9a-f]{8}\]/g) ?? [];
+}
+
+describe('pseudonymous identifier masking', () => {
+  beforeEach(() => {
+    delete process.env.SEQ_REDACTION_ENABLED;
+    delete process.env.SEQ_PSEUDONYM_ID_PROPERTIES;
+    // A fixed salt makes the digests reproducible across the whole suite. In
+    // production the salt defaults to a random per-process value — see
+    // pseudonymSalt() — so the placeholder is not a verifiable hash of the
+    // identifier.
+    process.env.SEQ_PSEUDONYM_SALT = 'test-salt';
+  });
+
+  afterEach(() => {
+    delete process.env.SEQ_PSEUDONYM_SALT;
+    delete process.env.SEQ_PSEUDONYM_ID_PROPERTIES;
+  });
+
+  it('masks a PatientId GUID and leaves an unrelated GUID intact', async () => {
+    const out = await redactDeep({
+      Properties: { PatientId: PATIENT_GUID, CorrelationId: CORRELATION_GUID },
+    });
+
+    expect(out.Properties.PatientId).not.toContain(PATIENT_GUID);
+    expect(out.Properties.PatientId).toMatch(PLACEHOLDER);
+    // A correlation id is indistinguishable from a patient id by VALUE; it must
+    // stay readable, or log analysis becomes impossible.
+    expect(out.Properties.CorrelationId).toBe(CORRELATION_GUID);
+  });
+
+  it('maps the same identifier to the same placeholder within a response', async () => {
+    const out = await redactDeep({
+      events: [
+        { Properties: { PatientId: PATIENT_GUID } },
+        { Properties: { PatientId: PATIENT_GUID } },
+        { Properties: { PatientId: OTHER_PATIENT_GUID } },
+      ],
+    });
+
+    const [first, second, third] = placeholders(out);
+    // Determinism is what keeps a debugging session able to see that two events
+    // concern the same patient.
+    expect(first).toBe(second);
+    expect(third).not.toBe(first);
+  });
+
+  it('is deterministic across responses for a given salt', async () => {
+    const first = await redactDeep({ PatientId: PATIENT_GUID });
+    const second = await redactDeep({ PatientId: PATIENT_GUID });
+    expect(first.PatientId).toBe(second.PatientId);
+  });
+
+  it('produces different placeholders under a different salt', async () => {
+    const first = await redactDeep({ PatientId: PATIENT_GUID });
+    process.env.SEQ_PSEUDONYM_SALT = 'another-salt';
+    const second = await redactDeep({ PatientId: PATIENT_GUID });
+    expect(second.PatientId).not.toBe(first.PatientId);
+    expect(second.PatientId).toMatch(PLACEHOLDER);
+  });
+
+  it('treats brace and case variants of a GUID as the same identifier', async () => {
+    const out = await redactDeep({
+      a: { PatientId: PATIENT_GUID },
+      b: { PatientId: PATIENT_GUID.toUpperCase() },
+      c: { PatientId: `{${PATIENT_GUID}}` },
+    });
+
+    expect(out.a.PatientId).toBe(out.b.PatientId);
+    expect(out.a.PatientId).toBe(out.c.PatientId);
+  });
+
+  it('masks a Seq { Name, Value } event property pair', async () => {
+    // /api/events returns event properties as name/value objects, so the
+    // identifier's name is a VALUE in the payload, not the object key.
+    const out = await redactDeep({
+      Properties: [
+        { Name: 'PatientId', Value: PATIENT_GUID },
+        { Name: 'StatusCode', Value: 200 },
+      ],
+    });
+
+    expect(out.Properties[0].Value).toMatch(PLACEHOLDER);
+    expect(out.Properties[0].Name).toBe('PatientId');
+    expect(out.Properties[1].Value).toBe(200);
+  });
+
+  it('masks a message-template token { PropertyName, FormattedValue }', async () => {
+    const out = await redactDeep({
+      MessageTemplateTokens: [
+        { Text: 'Hentet journal for ' },
+        { PropertyName: 'PatientId', RawText: '{PatientId}', FormattedValue: PATIENT_GUID },
+      ],
+    });
+
+    expect(out.MessageTemplateTokens[1].FormattedValue).toMatch(PLACEHOLDER);
+    expect(out.MessageTemplateTokens[0].Text).toBe('Hentet journal for ');
+  });
+
+  it('masks identifier columns of a sql_query rowset and keeps the aggregates', async () => {
+    // `select PatientId, count(*) from stream group by PatientId` puts the
+    // column NAME in a sibling array, so neither the key rule nor the
+    // name/value rule sees it.
+    const out = await redactDeep({
+      Columns: ['PatientId', 'count(*)'],
+      Rows: [
+        [PATIENT_GUID, 12],
+        [OTHER_PATIENT_GUID, 3],
+      ],
+    });
+
+    expect(out.Columns).toEqual(['PatientId', 'count(*)']);
+    expect(out.Rows[0][0]).toMatch(PLACEHOLDER);
+    expect(out.Rows[1][0]).toMatch(PLACEHOLDER);
+    expect(out.Rows[0][0]).not.toBe(out.Rows[1][0]);
+    expect(out.Rows[0][1]).toBe(12);
+    expect(out.Rows[1][1]).toBe(3);
+  });
+
+  it('masks a rowset column whose header wraps the identifier in an expression', async () => {
+    const out = await redactDeep({
+      Columns: ['distinct(PatientId)'],
+      Rows: [[PATIENT_GUID]],
+    });
+    expect(out.Rows[0][0]).toMatch(PLACEHOLDER);
+  });
+
+  it('gives a rendered message the same placeholder as the structured field', async () => {
+    // The rendered message repeats the GUID without naming the property, so it
+    // is only reachable via the value collected from Properties.
+    const out = await redactDeep({
+      RenderedMessage: `Hentet journal for ${PATIENT_GUID} pa 42 ms`,
+      Properties: { PatientId: PATIENT_GUID },
+    });
+
+    expect(out.RenderedMessage).not.toContain(PATIENT_GUID);
+    expect(out.RenderedMessage).toContain(out.Properties.PatientId);
+    // Unrelated numbers in the message are untouched.
+    expect(out.RenderedMessage).toContain('42 ms');
+  });
+
+  it('masks a value collected later in the payload than the message using it', async () => {
+    // Collection runs over the whole response before any masking, so walk order
+    // must not matter.
+    const out = await redactDeep([
+      { RenderedMessage: `Sletter samtykke for ${PATIENT_GUID}` },
+      { Properties: { PatientId: PATIENT_GUID } },
+    ]);
+    expect(JSON.stringify(out)).not.toContain(PATIENT_GUID);
+  });
+
+  it('masks an identifier that names its own property inside a string', async () => {
+    // The Seq error path redacts a raw body through redactText alone, with no
+    // surrounding structure to inspect.
+    const body = `{"Error":"The expression PatientId = '${PATIENT_GUID}' is invalid"}`;
+    const out = await redactText(body);
+    expect(out).not.toContain(PATIENT_GUID);
+    expect(out).toContain('PatientId');
+    expect(out).toContain('is invalid');
+  });
+
+  it('masks a JSON-quoted identifier in a raw body', async () => {
+    const out = await redactText(`{"PatientId":"${PATIENT_GUID}"}`);
+    expect(out).not.toContain(PATIENT_GUID);
+  });
+
+  it('does not splice the placeholder into the property name itself', async () => {
+    // Regression: the value `tId` also occurs inside "PatientId", so masking
+    // must splice at the LAST occurrence in the match, not the first.
+    const out = await redactText("filter: PatientId = 'tId'");
+    expect(out).toMatch(/^filter: PatientId = '\[PSEUDONYM_[0-9a-f]{8}\]'$/);
+  });
+
+  it('leaves ordinary prose after an identifier name intact', async () => {
+    const input = 'PatientId mangler i forespørselen, PatientId er ukjent';
+    expect(await redactText(input)).toBe(input);
+  });
+
+  it('masks a numeric identifier stored under an identifier property', async () => {
+    const out = await redactDeep({ PatientId: 4711 });
+    expect(out.PatientId).toMatch(PLACEHOLDER);
+  });
+
+  it('does not sweep a short numeric identifier out of unrelated free text', async () => {
+    // A small integer id also occurs as a duration or a count; replacing it
+    // everywhere would corrupt the logs. The property itself is still masked.
+    const out = await redactDeep({
+      PatientId: 4711,
+      RenderedMessage: 'Ferdig etter 4711 ms',
+    });
+    expect(out.PatientId).toMatch(PLACEHOLDER);
+    expect(out.RenderedMessage).toBe('Ferdig etter 4711 ms');
+  });
+
+  it('masks a non-scalar value under an identifier property (fail-closed)', async () => {
+    const out = await redactDeep({ PatientId: { Id: PATIENT_GUID, Source: 'EPJ' } });
+    expect(JSON.stringify(out)).not.toContain(PATIENT_GUID);
+    expect(out.PatientId).toMatch(PLACEHOLDER);
+  });
+
+  it('leaves a null identifier as null rather than masking a non-value', async () => {
+    const out = await redactDeep({ PatientId: null });
+    expect(out.PatientId).toBeNull();
+  });
+
+  it('masks PatientGuid as well as PatientId', async () => {
+    const out = await redactDeep({ PatientGuid: PATIENT_GUID });
+    expect(out.PatientGuid).toMatch(PLACEHOLDER);
+  });
+
+  it('extends the property list from SEQ_PSEUDONYM_ID_PROPERTIES', async () => {
+    process.env.SEQ_PSEUDONYM_ID_PROPERTIES = 'UserId, DoctorId';
+    const out = await redactDeep({ UserId: CORRELATION_GUID, DoctorId: 99 });
+    expect(out.UserId).toMatch(PLACEHOLDER);
+    expect(out.DoctorId).toMatch(PLACEHOLDER);
+  });
+
+  it('cannot switch off the built-in properties via the env list', async () => {
+    // The env var extends the defaults; it can never shrink them.
+    process.env.SEQ_PSEUDONYM_ID_PROPERTIES = 'SomethingElse';
+    const out = await redactDeep({ PatientId: PATIENT_GUID });
+    expect(out.PatientId).toMatch(PLACEHOLDER);
+  });
+
+  it('keeps the placeholder intact through the other redaction passes', async () => {
+    // The `_` in the placeholder is what stops the \b-anchored phone and
+    // fødselsnummer patterns from matching its digits.
+    const out = await redactDeep({
+      PatientId: PATIENT_GUID,
+      RenderedMessage: `Pasient ${PATIENT_GUID} ringte fra 99 88 77 66`,
+    });
+    expect(out.PatientId).toMatch(PLACEHOLDER);
+    expect(out.RenderedMessage).toContain(out.PatientId);
+    expect(out.RenderedMessage).not.toContain('99 88 77 66');
+  });
+
+  it('returns the payload untouched when redaction is disabled', async () => {
+    process.env.SEQ_REDACTION_ENABLED = 'false';
+    const event = { Properties: { PatientId: PATIENT_GUID } };
+    expect(await redactDeep(event)).toEqual(event);
+  });
+});

@@ -81,6 +81,26 @@ from `src/`. `esbuild` is pinned to an exact version so the bundle is byte-repro
 - All log data returned from Seq passes through `redactDeep` (`src/redact.ts`) before
   leaving the server, masking Norwegian personal data: fødselsnummer (incl. D/H/FH-numbers),
   person names (curated dictionary), phone numbers, and emails.
+- **Pseudonymous patient identifiers** (`PatientId`, `PatientGuid`, …) are masked by the
+  property **NAME**, never by the value: they are GUIDs, identical in form to the
+  correlation/request/signal ids that must stay readable. Three passes, because the name is
+  not always next to the value: (A) structural — the object key, a Seq `{Name,Value}` /
+  `{PropertyName,FormattedValue}` pair, or a `sql_query` `Columns` header (the name sits in a
+  SIBLING array, so `group by PatientId` would otherwise return a list of patient ids);
+  (B) name-anchored text (`PatientId = '…'`), which is the only pass reaching a Seq ERROR
+  BODY, since that path calls `redactText` alone; (C) the values found by A/B swept out of
+  every string in the SAME response, so a rendered message repeating the GUID gets the
+  identical placeholder. Pass C is limited to distinctive values (GUID, or ≥12 chars with a
+  digit) — blanket-replacing a small integer id would corrupt durations and counts.
+- Identifier placeholders are `[PSEUDONYM_<8 hex>]`, a SALTED digest whose salt defaults to a
+  RANDOM per-process value. Do not "simplify" that to an unsalted hash: an unsalted digest is
+  a stable pseudonym of the identifier, letting anyone with a candidate GUID confirm the
+  patient appears in an exported excerpt. `SEQ_PSEUDONYM_SALT` trades that away for stability
+  across restarts/replicas and is a SECRET. The `_` before the digest is load-bearing — it
+  denies the `\b`-anchored phone/fnr patterns a boundary inside a placeholder we just wrote.
+- `SEQ_PSEUDONYM_ID_PROPERTIES` EXTENDS the built-in identifier name list and can never shrink
+  it (same rule as the other WebMed connectors' privacy lists). `UserId`/`DoctorId`/
+  `PractitionerId` are deliberately absent by default: WebMed staff, not the data subject.
 - Enabled by default; set `SEQ_REDACTION_ENABLED=false` to disable (e.g. local debugging
   against an instance with no real personal data).
 - Redaction runs entirely in-process — no log content is sent anywhere.

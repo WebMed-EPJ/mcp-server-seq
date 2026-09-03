@@ -21489,6 +21489,9 @@ var EMPTY_COMPLETION_RESULT = {
   }
 };
 
+// src/redact.ts
+import { createHash, randomBytes } from "node:crypto";
+
 // node_modules/openredaction/dist/index.mjs
 import { createRequire } from "node:module";
 import * as fs from "fs";
@@ -34078,7 +34081,7 @@ var init_JsonProcessor = __esmMin(() => {
     */
     redactPreservingStructure(data, pathsToRedact) {
       const pathSet = new Set(pathsToRedact);
-      const redactValue = (value, currentPath) => {
+      const redactValue2 = (value, currentPath) => {
         if (pathSet.has(currentPath)) {
           if (typeof value === "string") return "[REDACTED]";
           else if (typeof value === "number") return 0;
@@ -34088,15 +34091,15 @@ var init_JsonProcessor = __esmMin(() => {
           else if (typeof value === "object") return {};
           return "[REDACTED]";
         }
-        if (Array.isArray(value)) return value.map((item, index) => redactValue(item, `${currentPath}[${index}]`));
+        if (Array.isArray(value)) return value.map((item, index) => redactValue2(item, `${currentPath}[${index}]`));
         if (value !== null && typeof value === "object") {
           const result = {};
-          for (const [key, val] of Object.entries(value)) result[key] = redactValue(val, currentPath ? `${currentPath}.${key}` : key);
+          for (const [key, val] of Object.entries(value)) result[key] = redactValue2(val, currentPath ? `${currentPath}.${key}` : key);
           return result;
         }
         return value;
       };
-      return redactValue(data, "");
+      return redactValue2(data, "");
     }
     /**
     * Simple text-based redaction (fallback)
@@ -36497,6 +36500,184 @@ function redactNorwegianNames(text) {
   }
   return out + text.slice(cursor);
 }
+var DEFAULT_PSEUDONYM_ID_PROPERTIES = [
+  "patientid",
+  "patientguid",
+  "patientkey",
+  "patientuid",
+  // Norwegian spellings, in case a service logs them that way.
+  "pasientid",
+  "pasientguid"
+];
+var PSEUDONYM_NAME_KEYS = ["name", "propertyname"];
+var PSEUDONYM_NAMED_VALUE_KEYS = ["value", "formattedvalue"];
+var GUID_SHAPE = /^\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}?$/i;
+var MAX_ID_VALUE_LENGTH = 256;
+var idPropertiesCache = null;
+function pseudonymIdProperties() {
+  const raw = process.env.SEQ_PSEUDONYM_ID_PROPERTIES ?? "";
+  if (idPropertiesCache && idPropertiesCache.raw === raw) return idPropertiesCache.names;
+  const names = new Set(DEFAULT_PSEUDONYM_ID_PROPERTIES);
+  for (const extra of raw.split(/[,\s]+/)) {
+    const trimmed = extra.trim().toLowerCase();
+    if (trimmed) names.add(trimmed);
+  }
+  idPropertiesCache = { raw, names };
+  return names;
+}
+var saltCache = null;
+function pseudonymSalt() {
+  const raw = process.env.SEQ_PSEUDONYM_SALT;
+  if (saltCache && saltCache.raw === raw) return saltCache.salt;
+  const salt = raw && raw.length > 0 ? raw : randomBytes(32).toString("hex");
+  saltCache = { raw, salt };
+  return salt;
+}
+function pseudonymKey(value) {
+  return GUID_SHAPE.test(value) ? value.replace(/[{}]/g, "").toLowerCase() : value;
+}
+function pseudonymPlaceholder(value) {
+  const digest = createHash("sha256").update(pseudonymSalt()).update("\0").update(pseudonymKey(value)).digest("hex").slice(0, 8);
+  return `[PSEUDONYM_${digest}]`;
+}
+function maskIdentifierValue(value) {
+  if (value === null || value === void 0) return value;
+  if (typeof value === "string") return value === "" ? value : pseudonymPlaceholder(value);
+  if (typeof value === "object") return pseudonymPlaceholder(JSON.stringify(value) ?? "");
+  return pseudonymPlaceholder(String(value));
+}
+function isDistinctiveIdValue(value) {
+  if (value.length > MAX_ID_VALUE_LENGTH) return false;
+  if (GUID_SHAPE.test(value)) return true;
+  return value.length >= 12 && /\d/.test(value) && !/\s/.test(value);
+}
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+var namedPatternCache = null;
+function namedIdentifierPattern() {
+  const names = [...pseudonymIdProperties()].sort();
+  const key = names.join(",");
+  if (namedPatternCache && namedPatternCache.key === key) {
+    namedPatternCache.pattern.lastIndex = 0;
+    return namedPatternCache.pattern;
+  }
+  const alternation = names.map(escapeRegExp).join("|");
+  const pattern = new RegExp(
+    // The property name, not itself part of a longer word …
+    `(?<![0-9A-Za-z_])(?:${alternation})(?![0-9A-Za-z_])['"]{0,1}(?:[ \\t]{0,8}[:=]{1,2}[ \\t]{0,8}|[ \\t]{1,8})(?:'([^'\\r\\n]{1,128})'|"([^"\\r\\n]{1,128})"|([0-9A-Za-z][0-9A-Za-z._:-]{2,127}))`,
+    "gi"
+  );
+  namedPatternCache = { key, pattern };
+  return pattern;
+}
+function isBareIdentifierToken(token) {
+  return /\d/.test(token);
+}
+function namedIdentifierValue(single, double, bare) {
+  const quoted = single ?? double;
+  if (quoted !== void 0) return quoted;
+  if (bare !== void 0 && isBareIdentifierToken(bare)) return bare;
+  return void 0;
+}
+function redactNamedIdentifiers(text) {
+  return text.replace(
+    namedIdentifierPattern(),
+    (match, single, double, bare) => {
+      const value = namedIdentifierValue(single, double, bare);
+      if (value === void 0) return match;
+      const at = match.lastIndexOf(value);
+      return match.slice(0, at) + pseudonymPlaceholder(value) + match.slice(at + value.length);
+    }
+  );
+}
+function compileCollectedIdentifiers(values) {
+  const distinctive = [...values].filter(isDistinctiveIdValue).sort((a, b) => b.length - a.length);
+  if (distinctive.length === 0) return { pattern: null, placeholders: /* @__PURE__ */ new Map() };
+  const placeholders = /* @__PURE__ */ new Map();
+  for (const value of distinctive) {
+    placeholders.set(value.toLowerCase(), pseudonymPlaceholder(value));
+  }
+  return {
+    pattern: new RegExp(
+      `(?<![0-9A-Za-z])(?:${distinctive.map(escapeRegExp).join("|")})(?![0-9A-Za-z])`,
+      "gi"
+    ),
+    placeholders
+  };
+}
+function redactCollectedIdentifiers(text, ids) {
+  if (!ids.pattern || !text) return text;
+  return text.replace(ids.pattern, (match) => ids.placeholders.get(match.toLowerCase()) ?? match);
+}
+function pseudonymColumnIndexes(value) {
+  const columns = value.Columns;
+  if (!Array.isArray(columns) || !Array.isArray(value.Rows)) return null;
+  const names = pseudonymIdProperties();
+  const indexes = /* @__PURE__ */ new Set();
+  columns.forEach((column, index) => {
+    if (typeof column !== "string") return;
+    const header = column.toLowerCase();
+    for (const name of names) {
+      if (new RegExp(`(?<![0-9a-z_])${escapeRegExp(name)}(?![0-9a-z_])`).test(header)) {
+        indexes.add(index);
+        return;
+      }
+    }
+  });
+  return indexes.size > 0 ? indexes : null;
+}
+function isNamedIdentifierPair(value) {
+  const names = pseudonymIdProperties();
+  for (const [key, member] of Object.entries(value)) {
+    if (!PSEUDONYM_NAME_KEYS.includes(key.toLowerCase())) continue;
+    if (typeof member === "string" && names.has(member.trim().toLowerCase())) return true;
+  }
+  return false;
+}
+function collectRowIdentifiers(rows, columnIndexes, out) {
+  for (const row of rows) {
+    if (!Array.isArray(row)) continue;
+    row.forEach((cell, index) => {
+      if (!columnIndexes.has(index)) return;
+      if (typeof cell === "string") out.add(cell);
+      else if (typeof cell === "number" || typeof cell === "bigint") out.add(String(cell));
+    });
+  }
+}
+function collectPseudonymValues(value, out) {
+  if (typeof value === "string") {
+    const pattern = namedIdentifierPattern();
+    let match;
+    while ((match = pattern.exec(value)) !== null) {
+      const found = namedIdentifierValue(match[1], match[2], match[3]);
+      if (found) out.add(found);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectPseudonymValues(item, out);
+    return;
+  }
+  if (value === null || typeof value !== "object") return;
+  const record2 = value;
+  const names = pseudonymIdProperties();
+  const columnIndexes = pseudonymColumnIndexes(record2);
+  const namedPair = isNamedIdentifierPair(record2);
+  for (const [key, member] of Object.entries(record2)) {
+    const lowerKey = key.toLowerCase();
+    if (names.has(lowerKey) || namedPair && PSEUDONYM_NAMED_VALUE_KEYS.includes(lowerKey)) {
+      if (typeof member === "string") out.add(member);
+      else if (typeof member === "number" || typeof member === "bigint") out.add(String(member));
+      continue;
+    }
+    if (columnIndexes && key === "Rows" && Array.isArray(member)) {
+      collectRowIdentifiers(member, columnIndexes, out);
+      continue;
+    }
+    collectPseudonymValues(member, out);
+  }
+}
 var detector = null;
 function getDetector() {
   if (!detector) {
@@ -36521,7 +36702,7 @@ function getDetector() {
 var SEGMENT_DELIMITERS = /([;|\r\n\t]+)/;
 async function redactText(text) {
   if (!isRedactionEnabled() || !text) return text;
-  const parts = text.split(SEGMENT_DELIMITERS);
+  const parts = redactNamedIdentifiers(text).split(SEGMENT_DELIMITERS);
   const detector2 = getDetector();
   const out = [];
   for (let index = 0; index < parts.length; index++) {
@@ -36535,20 +36716,49 @@ async function redactText(text) {
   }
   return out.join("");
 }
-async function redactDeep(value) {
-  if (!isRedactionEnabled()) return value;
+async function redactRows(rows, columnIndexes, ids) {
+  const out = [];
+  for (const row of rows) {
+    if (!Array.isArray(row)) {
+      out.push(await redactValue(row, ids));
+      continue;
+    }
+    const cells = [];
+    for (let index = 0; index < row.length; index++) {
+      cells.push(
+        columnIndexes.has(index) ? maskIdentifierValue(row[index]) : await redactValue(row[index], ids)
+      );
+    }
+    out.push(cells);
+  }
+  return out;
+}
+async function redactValue(value, ids) {
   if (typeof value === "string") {
-    return await redactText(value);
+    return redactText(redactCollectedIdentifiers(value, ids));
   }
   if (Array.isArray(value)) {
     const arr = [];
-    for (const item of value) arr.push(await redactDeep(item));
+    for (const item of value) arr.push(await redactValue(item, ids));
     return arr;
   }
   if (value !== null && typeof value === "object") {
+    const record2 = value;
+    const names = pseudonymIdProperties();
+    const columnIndexes = pseudonymColumnIndexes(record2);
+    const namedPair = isNamedIdentifierPair(record2);
     const out = {};
-    for (const [key, val] of Object.entries(value)) {
-      out[key] = await redactDeep(val);
+    for (const [key, member] of Object.entries(record2)) {
+      const lowerKey = key.toLowerCase();
+      if (names.has(lowerKey) || namedPair && PSEUDONYM_NAMED_VALUE_KEYS.includes(lowerKey)) {
+        out[key] = maskIdentifierValue(member);
+        continue;
+      }
+      if (columnIndexes && key === "Rows" && Array.isArray(member)) {
+        out[key] = await redactRows(member, columnIndexes, ids);
+        continue;
+      }
+      out[key] = await redactValue(member, ids);
     }
     return out;
   }
@@ -36562,6 +36772,12 @@ async function redactDeep(value) {
     return value;
   }
   return value;
+}
+async function redactDeep(value) {
+  if (!isRedactionEnabled()) return value;
+  const collected = /* @__PURE__ */ new Set();
+  collectPseudonymValues(value, collected);
+  return await redactValue(value, compileCollectedIdentifiers(collected));
 }
 
 // src/timerange.ts
