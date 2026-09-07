@@ -461,6 +461,25 @@ describe('pseudonymous identifier masking', () => {
     expect(out.RenderedMessage).not.toContain('99 88 77 66');
   });
 
+  it('detects identifier columns consistently across a wide rowset', async () => {
+    // The column-header pattern is cached; a global regex would advance
+    // lastIndex between headers and start answering differently for the same
+    // header depending on what was tested before it.
+    const out = await redactDeep({
+      Columns: ['PatientId', 'ServiceName', 'PatientGuid', 'count(*)', 'distinct(PatientId)'],
+      Rows: [[PATIENT_GUID, 'epj-api', OTHER_PATIENT_GUID, 7, PATIENT_GUID]],
+    });
+
+    expect(out.Rows[0][0]).toMatch(PLACEHOLDER);
+    expect(out.Rows[0][2]).toMatch(PLACEHOLDER);
+    expect(out.Rows[0][4]).toMatch(PLACEHOLDER);
+    // Same identifier in two identifier columns → same placeholder.
+    expect(out.Rows[0][4]).toBe(out.Rows[0][0]);
+    // Non-identifier columns untouched.
+    expect(out.Rows[0][1]).toBe('epj-api');
+    expect(out.Rows[0][3]).toBe(7);
+  });
+
   it('bounds the free-text sweep without leaving a rowset identifier unmasked', async () => {
     // `group by PatientId` returns one distinct identifier per row, so the
     // sweep's value count is otherwise unbounded and its (synchronous) pattern

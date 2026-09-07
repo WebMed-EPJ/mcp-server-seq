@@ -36634,19 +36634,24 @@ function redactCollectedIdentifiers(text, ids) {
 function pseudonymColumnIndexes(value) {
   const columns = value.Columns;
   if (!Array.isArray(columns) || !Array.isArray(value.Rows)) return null;
-  const names = pseudonymIdProperties();
+  const pattern = columnHeaderPattern();
   const indexes = /* @__PURE__ */ new Set();
   columns.forEach((column, index) => {
     if (typeof column !== "string") return;
-    const header = column.toLowerCase();
-    for (const name of names) {
-      if (new RegExp(`(?<![0-9a-z_])${escapeRegExp(name)}(?![0-9a-z_])`).test(header)) {
-        indexes.add(index);
-        return;
-      }
-    }
+    if (pattern.test(column.toLowerCase())) indexes.add(index);
   });
   return indexes.size > 0 ? indexes : null;
+}
+var columnPatternCache = null;
+function columnHeaderPattern() {
+  const names = [...pseudonymIdProperties()].sort();
+  const key = names.join(",");
+  if (columnPatternCache && columnPatternCache.key === key) return columnPatternCache.pattern;
+  const pattern = new RegExp(
+    `(?<![0-9a-z_])(?:${names.map(escapeRegExp).join("|")})(?![0-9a-z_])`
+  );
+  columnPatternCache = { key, pattern };
+  return pattern;
 }
 function isNamedIdentifierPair(value) {
   const names = pseudonymIdProperties();

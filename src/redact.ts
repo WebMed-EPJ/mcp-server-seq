@@ -764,19 +764,41 @@ function redactCollectedIdentifiers(text: string, ids: CollectedIdentifiers): st
 function pseudonymColumnIndexes(value: Record<string, unknown>): ReadonlySet<number> | null {
   const columns = value.Columns;
   if (!Array.isArray(columns) || !Array.isArray(value.Rows)) return null;
-  const names = pseudonymIdProperties();
+  const pattern = columnHeaderPattern();
   const indexes = new Set<number>();
   columns.forEach((column, index) => {
     if (typeof column !== 'string') return;
-    const header = column.toLowerCase();
-    for (const name of names) {
-      if (new RegExp(`(?<![0-9a-z_])${escapeRegExp(name)}(?![0-9a-z_])`).test(header)) {
-        indexes.add(index);
-        return;
-      }
-    }
+    if (pattern.test(column.toLowerCase())) indexes.add(index);
   });
   return indexes.size > 0 ? indexes : null;
+}
+
+let columnPatternCache: { key: string; pattern: RegExp } | null = null;
+
+/**
+ * One alternation over the identifier property names, for testing a rowset's
+ * column headers.
+ *
+ * Cached per name set rather than rebuilt per column: `redactDeep` runs
+ * {@link pseudonymColumnIndexes} on every object in BOTH the collection and the
+ * redaction walk, so a per-column-per-name construction here is paid columns ×
+ * names × 2 for every rowset.
+ *
+ * Deliberately NOT global: `RegExp.test` on a `g` pattern advances `lastIndex`,
+ * so a cached global pattern would give a different answer on the same header
+ * depending on what was tested before it.
+ *
+ * @returns A non-global, rebuilt-only-when-the-name-set-changes regex
+ */
+function columnHeaderPattern(): RegExp {
+  const names = [...pseudonymIdProperties()].sort();
+  const key = names.join(',');
+  if (columnPatternCache && columnPatternCache.key === key) return columnPatternCache.pattern;
+  const pattern = new RegExp(
+    `(?<![0-9a-z_])(?:${names.map(escapeRegExp).join('|')})(?![0-9a-z_])`,
+  );
+  columnPatternCache = { key, pattern };
+  return pattern;
 }
 
 /**
