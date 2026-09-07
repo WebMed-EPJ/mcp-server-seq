@@ -350,27 +350,47 @@ const GUID_SHAPE = /^\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 const MAX_ID_VALUE_LENGTH = 256;
 
 /**
- * Most identifier values the free-text sweep (pass C) will search for in one
- * response.
+ * Most NON-GUID identifier values the free-text sweep (pass C) will search for
+ * in one response.
  *
- * The sweep compiles the collected values into an alternation, and the number
- * of values is otherwise unbounded: `select PatientId, count(*) … group by
- * PatientId` returns one distinct identifier PER ROW, so a large rowset makes a
- * large pattern. Measured on V8, matching stays cheap (the alternation is
- * dispatched, not backtracked) but COMPILATION is synchronous and grows
- * linearly — ~4 ms at 1 000 values, ~550 ms at 100 000, ~2.3 s at 300 000. On
- * the hosted server that is an event-loop stall for every other user, so the
- * count is capped.
+ * Only non-GUID values are capped, and the distinction is what makes the cap
+ * safe. A per-value alternation has to be COMPILED, and compilation is
+ * synchronous and linear in the value count — measured on V8: ~4 ms at 1 000
+ * values, ~550 ms at 100 000, ~2.3 s at 300 000. The count is otherwise
+ * unbounded, because `select PatientId, … group by PatientId` returns one
+ * distinct identifier PER ROW. On the hosted server a 2.3 s compile is an
+ * event-loop stall for every other user.
  *
- * Capping costs nothing where it binds: the responses that collect thousands of
- * identifiers are rowsets, whose identifiers are masked by the STRUCTURAL pass
- * (their column is masked cell by cell) and which carry no free text for the
- * sweep to clean. A value past the cap is therefore still masked where it
- * appears — under its property name, and next to it in text — it is only not
- * searched for elsewhere. 1 000 distinct identifiers in one response's prose is
- * far beyond any real investigation.
+ * GUIDs — WebMed's actual `PatientId` shape, and the only kind a large rowset
+ * produces in bulk — need no alternation at all: {@link GUID_TOKEN} matches
+ * them by SHAPE at a fixed cost, and the collected set is resolved through a
+ * map lookup. So they are swept in full, uncapped, and the cap can only ever
+ * bind on opaque non-GUID keys, which arrive a handful at a time.
+ *
+ * Do NOT restore a cap over GUIDs on the theory that a big rowset has no free
+ * text to sweep: `sql_query` takes arbitrary columns, so
+ * `select PatientId, RenderedMessage …` is a rowset that carries both, and a
+ * capped sweep left the identifier standing in the message column while its
+ * own column was masked.
  */
 const MAX_SWEEP_VALUES = 1000;
+
+/**
+ * A GUID recognised by its SHAPE rather than by a known value, fenced so it is
+ * never cut out of a longer alphanumeric run.
+ *
+ * Anchoring on the GUID's own structure — not on a greedy identifier character
+ * class — is what makes a fixed scan safe here. A generic token scan whose
+ * class contains `-` swallows `abc-3fa85f64-…` as ONE token and then fails to
+ * resolve it, leaving the GUID unmasked; this pattern still finds the GUID
+ * inside that run, and inside `{…}` braces.
+ *
+ * Matching by shape does NOT mean masking by shape: a match is replaced only
+ * when it resolves in the response's collected set, so an unrelated
+ * correlation or request id stays readable.
+ */
+const GUID_TOKEN =
+  /(?<![0-9A-Za-z])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9A-Za-z])/gi;
 
 let idPropertiesCache: { raw: string; names: ReadonlySet<string> } | null = null;
 
@@ -522,13 +542,19 @@ const UNSERIALISABLE_IDENTIFIER = '\u0000unserialisable-identifier';
  * replaced — everywhere else in the same response (pass C in
  * {@link redactDeep}).
  *
- * A GUID, or a long identifier-shaped token, cannot plausibly collide with
- * unrelated log text. A short or purely numeric one can: an integer patient id
- * such as `4711` also occurs as a duration, a status count or a port, and
- * blanket-replacing it would corrupt the very logs the tool exists to explain.
- * Such values are still masked where they appear under their property name
- * (pass A) or next to it (pass B) — the free-text sweep is simply not safe for
- * them. This limitation is documented in the README.
+ * A GUID, or a long unbroken token, cannot plausibly collide with unrelated log
+ * text. A short one can: an integer patient id such as `4711` also occurs as a
+ * duration, a status count or a port, and blanket-replacing it would corrupt the
+ * very logs the tool exists to explain. Such values are still masked where they
+ * appear under their property name (pass A) or next to it (pass B) — the
+ * free-text sweep is simply not safe for them. This limitation is documented in
+ * the README.
+ *
+ * Length and the absence of whitespace are the whole test; a digit is NOT
+ * required. Every value reaching here was collected from a CONFIRMED identifier
+ * property, so it is known to be an identifier rather than guessed from its
+ * shape — and an alphabetic-only key under `PatientKey`/`PatientUid` would
+ * otherwise stay in free text while its structured field was masked.
  *
  * @param value - A collected identifier value
  * @returns true when the value may be replaced in arbitrary free text
@@ -536,7 +562,7 @@ const UNSERIALISABLE_IDENTIFIER = '\u0000unserialisable-identifier';
 function isDistinctiveIdValue(value: string): boolean {
   if (value.length > MAX_ID_VALUE_LENGTH) return false;
   if (GUID_SHAPE.test(value)) return true;
-  return value.length >= 12 && /\d/.test(value) && !/\s/.test(value);
+  return value.length >= 12 && !/\s/.test(value);
 }
 
 /**
@@ -650,93 +676,71 @@ function redactNamedIdentifiers(text: string): string {
 }
 
 /**
- * The identifier values collected from one response, compiled into alternations
- * so every string in the payload costs a fixed number of regex passes rather
- * than one pass per identifier.
+ * The identifier values collected from one response, prepared so every string
+ * in the payload costs a fixed number of regex passes rather than one pass per
+ * identifier.
  *
- * There are two patterns rather than one because case significance differs by
- * value shape, and pass C must agree with {@link pseudonymKey} on that: a GUID
- * is the same identifier in any casing, while for any other opaque identifier a
- * case difference may be a real difference. Matching everything
- * case-insensitively against one lower-cased lookup would collapse two
- * genuinely distinct non-GUID identifiers that differ only by case into one
- * placeholder — exactly the false "same patient" the determinism guarantee
- * exists to prevent.
+ * GUIDs and everything else are handled by different mechanisms, because case
+ * significance and cost differ:
+ *
+ *  - **GUIDs** are matched by SHAPE ({@link GUID_TOKEN}) and resolved through
+ *    {@link placeholders}. No pattern is built from the values, so the cost is
+ *    independent of how many were collected — which is what lets a
+ *    thousand-row `group by PatientId` be swept in full. Case-insensitive, and
+ *    brace wrappers fall outside the match, so every spelling of one GUID
+ *    resolves to one placeholder.
+ *  - **Everything else** is matched by an exact, case-SENSITIVE alternation
+ *    over the values, capped at {@link MAX_SWEEP_VALUES}. Case matters because
+ *    {@link pseudonymKey} hashes these verbatim: normalising it could merge two
+ *    distinct opaque identifiers into one placeholder.
  */
 interface CollectedIdentifiers {
-  /** GUID-shaped values, matched case-insensitively. Null when there are none. */
-  guidPattern: RegExp | null;
-  /** Every other value, matched case-sensitively. Null when there are none. */
+  /** True when the response held at least one GUID to resolve. */
+  hasGuids: boolean;
+  /** Non-GUID values, matched case-sensitively. Null when there are none. */
   exactPattern: RegExp | null;
   /** {@link pseudonymKey} of the value → placeholder. */
   placeholders: ReadonlyMap<string, string>;
 }
 
 /**
- * Compile the distinctive identifier values of a response for the free-text
+ * Prepare the distinctive identifier values of a response for the free-text
  * sweep (pass C — see {@link redactDeep}).
  *
- * Longest first within each pattern, so an identifier that contains a shorter
- * one is masked as a whole rather than hollowed out from the inside, and capped
- * at {@link MAX_SWEEP_VALUES}. Both patterns are fenced by alphanumeric
- * lookarounds so a value is never cut out of the middle of a longer token.
+ * Non-GUID values go into an alternation longest-first, so an identifier that
+ * contains a shorter one is masked as a whole rather than hollowed out from the
+ * inside, and are capped; GUIDs need no pattern at all.
  *
  * @param values - Raw identifier values collected from the response
- * @returns The compiled patterns and their shared placeholder lookup
+ * @returns The compiled non-GUID pattern and the shared placeholder lookup
  */
 function compileCollectedIdentifiers(values: Iterable<string>): CollectedIdentifiers {
   const distinctive = [...values]
     .filter(isDistinctiveIdValue)
-    .sort((a, b) => b.length - a.length)
-    // Bounded so a large rowset cannot turn pass C into an event-loop stall —
-    // see MAX_SWEEP_VALUES for why dropping the tail is safe.
-    .slice(0, MAX_SWEEP_VALUES);
+    .sort((a, b) => b.length - a.length);
 
   const placeholders = new Map<string, string>();
   for (const value of distinctive) {
     placeholders.set(pseudonymKey(value), pseudonymPlaceholder(value));
   }
 
-  // A GUID is the same identifier with or without its brace wrapper, and both
-  // forms occur: .NET's `Guid.ToString("B")` writes `{3fa8…}`, its default
-  // writes it bare. Each collected GUID therefore enters the alternation in
-  // BOTH forms, or the sweep would be asymmetric — a bare value already matches
-  // inside braces (a brace passes the alphanumeric lookarounds), but a value
-  // collected braced would never match a bare occurrence, leaving it unmasked.
-  // `pseudonymKey` strips the braces, so either form resolves to one
-  // placeholder. This at most doubles the branch count, which MAX_SWEEP_VALUES
-  // already bounds.
-  const guids = [
-    ...new Set(
-      distinctive
-        .filter((value) => GUID_SHAPE.test(value))
-        .flatMap((value) => {
-          const bare = value.replace(/[{}]/g, '');
-          return [`{${bare}}`, bare];
-        }),
-    ),
-  ].sort((a, b) => b.length - a.length);
-  const others = distinctive.filter((value) => !GUID_SHAPE.test(value));
+  const guids = distinctive.filter((value) => GUID_SHAPE.test(value));
+  const others = distinctive
+    .filter((value) => !GUID_SHAPE.test(value))
+    // Bounded so a large rowset of opaque keys cannot turn pattern compilation
+    // into an event-loop stall — see MAX_SWEEP_VALUES. GUIDs are NOT capped.
+    .slice(0, MAX_SWEEP_VALUES);
+
   return {
-    guidPattern: collectedValuePattern(guids, 'gi'),
-    exactPattern: collectedValuePattern(others, 'g'),
+    hasGuids: guids.length > 0,
+    exactPattern: others.length > 0
+      ? new RegExp(
+          `(?<![0-9A-Za-z])(?:${others.map(escapeRegExp).join('|')})(?![0-9A-Za-z])`,
+          'g',
+        )
+      : null,
     placeholders,
   };
-}
-
-/**
- * Build one fenced alternation over a set of collected identifier values.
- *
- * @param values - The values to match, longest first
- * @param flags - Regex flags, deciding this pattern's case sensitivity
- * @returns The pattern, or null when there are no values
- */
-function collectedValuePattern(values: readonly string[], flags: string): RegExp | null {
-  if (values.length === 0) return null;
-  return new RegExp(
-    `(?<![0-9A-Za-z])(?:${values.map(escapeRegExp).join('|')})(?![0-9A-Za-z])`,
-    flags,
-  );
 }
 
 /**
@@ -745,22 +749,29 @@ function collectedValuePattern(values: readonly string[], flags: string): RegExp
  * for 3fa85f64-…") is masked with the same placeholder as the structured field
  * it came from.
  *
- * Both passes resolve the placeholder through {@link pseudonymKey}, the same
- * normalisation the digest uses, so a case-insensitive GUID match and a
- * case-sensitive match of anything else land on the identical placeholder the
- * structural pass wrote.
+ * Both passes resolve through {@link pseudonymKey}, the same normalisation the
+ * digest uses, so a shape-matched GUID and an exact match of anything else land
+ * on the identical placeholder the structural pass wrote. A shape match that
+ * does NOT resolve is left alone — that is how an unrelated correlation id
+ * survives a sweep that recognises its form.
  *
  * @param text - The text to scan
- * @param ids - The compiled identifiers of the response
+ * @param ids - The prepared identifiers of the response
  * @returns The text with those values masked
  */
 function redactCollectedIdentifiers(text: string, ids: CollectedIdentifiers): string {
   if (!text) return text;
   let out = text;
-  for (const pattern of [ids.guidPattern, ids.exactPattern]) {
-    if (!pattern) continue;
-    pattern.lastIndex = 0;
-    out = out.replace(pattern, (match) => ids.placeholders.get(pseudonymKey(match)) ?? match);
+  if (ids.hasGuids) {
+    GUID_TOKEN.lastIndex = 0;
+    out = out.replace(GUID_TOKEN, (match) => ids.placeholders.get(pseudonymKey(match)) ?? match);
+  }
+  if (ids.exactPattern) {
+    ids.exactPattern.lastIndex = 0;
+    out = out.replace(
+      ids.exactPattern,
+      (match) => ids.placeholders.get(pseudonymKey(match)) ?? match,
+    );
   }
   return out;
 }

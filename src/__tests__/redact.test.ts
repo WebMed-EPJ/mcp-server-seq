@@ -505,29 +505,56 @@ describe('pseudonymous identifier masking', () => {
     expect(out.Rows[0][3]).toBe(7);
   });
 
-  it('bounds the free-text sweep without leaving a rowset identifier unmasked', async () => {
-    // `group by PatientId` returns one distinct identifier per row, so the
-    // sweep's value count is otherwise unbounded and its (synchronous) pattern
-    // compilation grows with the row count. Capping it must not weaken the
-    // structural pass: every cell in the identifier column is still masked.
-    const rows = Array.from({ length: 2500 }, (_, i) => [
-      `3fa85f64-5717-4562-b3fc-${String(i).padStart(12, '0')}`,
-      i,
-    ]);
+  it('masks identifiers in a rowset free-text column past the sweep cap', async () => {
+    // Regression for a wrong claim of mine: I documented the sweep cap as safe
+    // because "a rowset carries no free text to sweep". `sql_query` takes
+    // arbitrary columns, so `select PatientId, Message …` carries both — and a
+    // capped sweep left the identifier standing in Message while its own column
+    // was masked. GUIDs are now swept by shape, uncapped.
+    const rows = Array.from({ length: 1200 }, (_, i) => {
+      const guid = `3fa85f64-5717-4562-b3fc-${String(i).padStart(12, '0')}`;
+      return [guid, `Hentet journal for ${guid} pa 42 ms`];
+    });
     const started = Date.now();
-    const out = await redactDeep({ Columns: ['PatientId', 'count(*)'], Rows: rows });
+    const out = await redactDeep({ Columns: ['PatientId', 'Message'], Rows: rows });
     const elapsed = Date.now() - started;
 
-    const serialized = JSON.stringify(out);
-    expect(serialized).not.toContain('3fa85f64-5717-4562-b3fc-');
-    expect(out.Rows).toHaveLength(2500);
-    expect(out.Rows[0][0]).toMatch(PLACEHOLDER);
-    expect(out.Rows[2499][0]).toMatch(PLACEHOLDER);
-    // Aggregates survive.
-    expect(out.Rows[2499][1]).toBe(2499);
-    // Generous, but an unbounded alternation over 2 500 values is an order of
-    // magnitude slower to compile than a capped one.
-    expect(elapsed).toBeLessThan(10_000);
+    expect(JSON.stringify(out)).not.toContain('3fa85f64-5717-4562-b3fc-');
+    // Every row: the message carries its OWN row's placeholder.
+    for (const index of [0, 599, 1199]) {
+      expect(out.Rows[index][0]).toMatch(PLACEHOLDER);
+      expect(out.Rows[index][1]).toContain(out.Rows[index][0]);
+      expect(out.Rows[index][1]).toContain('42 ms');
+    }
+    expect(elapsed).toBeLessThan(20_000);
+  });
+
+  it('leaves an unrelated GUID readable even though GUIDs are matched by shape', async () => {
+    // Shape-matching must not become masking-by-shape: a match is replaced only
+    // when it resolves in the collected set.
+    const out = await redactDeep({
+      Properties: { PatientId: PATIENT_GUID, CorrelationId: CORRELATION_GUID },
+      RenderedMessage: `Sak ${CORRELATION_GUID} for pasient ${PATIENT_GUID}`,
+    });
+
+    expect(out.RenderedMessage).toContain(CORRELATION_GUID);
+    expect(out.RenderedMessage).not.toContain(PATIENT_GUID);
+    expect(out.RenderedMessage).toContain(out.Properties.PatientId);
+  });
+
+  it('sweeps a confirmed alphabetic-only identifier out of free text', async () => {
+    // isDistinctiveIdValue no longer requires a digit: the value came from a
+    // CONFIRMED identifier property, so it is known rather than guessed, and
+    // was otherwise left standing in prose while its field was masked.
+    process.env.SEQ_PSEUDONYM_ID_PROPERTIES = 'PatientKey';
+    const key = 'abcdefghijklmn';
+    const out = await redactDeep({
+      Properties: { PatientKey: key },
+      RenderedMessage: `Oppslag pa ${key} feilet`,
+    });
+
+    expect(out.RenderedMessage).not.toContain(key);
+    expect(out.RenderedMessage).toContain(out.Properties.PatientKey);
   });
 
   it('returns the payload untouched when redaction is disabled', async () => {

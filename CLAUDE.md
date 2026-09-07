@@ -91,7 +91,9 @@ from `src/`. `esbuild` is pinned to an exact version so the bundle is byte-repro
   BODY, since that path calls `redactText` alone; (C) the values found by A/B swept out of
   every string in the SAME response, so a rendered message repeating the GUID gets the
   identical placeholder. Pass C is limited to distinctive values (GUID, or ≥12 chars with a
-  digit) — blanket-replacing a small integer id would corrupt durations and counts. Pass C uses
+  no whitespace) — blanket-replacing a small integer id would corrupt durations and counts. A digit is
+  NOT required: the value came from a CONFIRMED identifier property, so an alphabetic-only
+  `PatientKey` would otherwise stay in prose while its field was masked. Pass C uses
   TWO patterns because its case sensitivity must AGREE with `pseudonymKey`: GUIDs match
   case-insensitively, everything else exactly. Do not "simplify" that back to one case-insensitive
   regex over a lower-cased lookup — two distinct opaque ids differing only by case then collapse into
@@ -101,12 +103,22 @@ from `src/`. `esbuild` is pinned to an exact version so the bundle is byte-repro
   sweep is otherwise ASYMMETRIC: a bare value already matches inside braces (a brace passes the
   alphanumeric lookarounds), but a value collected braced never matches a bare occurrence and leaves
   it unmasked. `pseudonymKey` strips braces, so either form resolves to one placeholder.
-- Pass C's value count is capped (`MAX_SWEEP_VALUES`, 1 000). `group by PatientId` returns one
-  distinct id PER ROW, and the alternation's compilation is SYNCHRONOUS and linear in that count
-  (measured: ~4 ms at 1 000, ~550 ms at 100 000, ~2.3 s at 300 000) — an event-loop stall for every
-  other user of the hosted server. Matching itself stays cheap, so do not "optimise" the match path
-  instead. The cap is safe because the responses that collect thousands of ids are ROWSETS, whose ids
-  the STRUCTURAL pass masks cell by cell and which carry no free text to sweep.
+- Pass C sweeps GUIDs by SHAPE (`GUID_TOKEN`) and resolves the match through the collected-value map,
+  so its cost is INDEPENDENT of how many were collected and GUIDs are swept UNCAPPED. Only non-GUID
+  values get a per-value alternation, capped at `MAX_SWEEP_VALUES` (1 000), because compiling one is
+  SYNCHRONOUS and linear in the count (measured: ~4 ms at 1 000, ~550 ms at 100 000, ~2.3 s at
+  300 000) — an event-loop stall for every other user of the hosted server. Matching itself stays
+  cheap, so do not "optimise" the match path instead.
+- Do NOT cap the GUID sweep on the theory that a big rowset has no free text: `sql_query` takes
+  ARBITRARY columns, so `select PatientId, RenderedMessage …` carries an identifier column AND a
+  free-text column, and a capped sweep left the identifier standing in the message while its own
+  column was masked. (That reasoning was written into this file once and was wrong; there is a
+  regression test with 1 200 rows over both column kinds.)
+- `GUID_TOKEN` is anchored on the GUID's OWN structure, not on a greedy identifier character class.
+  A generic token scan whose class contains `-` swallows `abc-3fa85f64-…` as ONE token and then
+  fails to resolve it, leaving the GUID unmasked. Matching by shape is NOT masking by shape: a match
+  is replaced only when it resolves in the response's collected set, so an unrelated correlation id
+  stays readable (there is a test).
 - `maskIdentifierValue` serialises a non-scalar value through `identifierObjectText`, which CATCHES
   `JSON.stringify` (it throws on a circular structure or a nested BigInt). Fail-closed: the value is
   still masked, with a fixed marker hashed in place of its text. A throw on the redaction path would

@@ -36514,6 +36514,7 @@ var PSEUDONYM_NAMED_VALUE_KEYS = ["value", "formattedvalue"];
 var GUID_SHAPE = /^\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}?$/i;
 var MAX_ID_VALUE_LENGTH = 256;
 var MAX_SWEEP_VALUES = 1e3;
+var GUID_TOKEN = /(?<![0-9A-Za-z])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9A-Za-z])/gi;
 var idPropertiesCache = null;
 function pseudonymIdProperties() {
   const raw = process.env.SEQ_PSEUDONYM_ID_PROPERTIES ?? "";
@@ -36558,7 +36559,7 @@ var UNSERIALISABLE_IDENTIFIER = "\0unserialisable-identifier";
 function isDistinctiveIdValue(value) {
   if (value.length > MAX_ID_VALUE_LENGTH) return false;
   if (GUID_SHAPE.test(value)) return true;
-  return value.length >= 12 && /\d/.test(value) && !/\s/.test(value);
+  return value.length >= 12 && !/\s/.test(value);
 }
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -36601,40 +36602,35 @@ function redactNamedIdentifiers(text) {
   );
 }
 function compileCollectedIdentifiers(values) {
-  const distinctive = [...values].filter(isDistinctiveIdValue).sort((a, b) => b.length - a.length).slice(0, MAX_SWEEP_VALUES);
+  const distinctive = [...values].filter(isDistinctiveIdValue).sort((a, b) => b.length - a.length);
   const placeholders = /* @__PURE__ */ new Map();
   for (const value of distinctive) {
     placeholders.set(pseudonymKey(value), pseudonymPlaceholder(value));
   }
-  const guids = [
-    ...new Set(
-      distinctive.filter((value) => GUID_SHAPE.test(value)).flatMap((value) => {
-        const bare = value.replace(/[{}]/g, "");
-        return [`{${bare}}`, bare];
-      })
-    )
-  ].sort((a, b) => b.length - a.length);
-  const others = distinctive.filter((value) => !GUID_SHAPE.test(value));
+  const guids = distinctive.filter((value) => GUID_SHAPE.test(value));
+  const others = distinctive.filter((value) => !GUID_SHAPE.test(value)).slice(0, MAX_SWEEP_VALUES);
   return {
-    guidPattern: collectedValuePattern(guids, "gi"),
-    exactPattern: collectedValuePattern(others, "g"),
+    hasGuids: guids.length > 0,
+    exactPattern: others.length > 0 ? new RegExp(
+      `(?<![0-9A-Za-z])(?:${others.map(escapeRegExp).join("|")})(?![0-9A-Za-z])`,
+      "g"
+    ) : null,
     placeholders
   };
-}
-function collectedValuePattern(values, flags) {
-  if (values.length === 0) return null;
-  return new RegExp(
-    `(?<![0-9A-Za-z])(?:${values.map(escapeRegExp).join("|")})(?![0-9A-Za-z])`,
-    flags
-  );
 }
 function redactCollectedIdentifiers(text, ids) {
   if (!text) return text;
   let out = text;
-  for (const pattern of [ids.guidPattern, ids.exactPattern]) {
-    if (!pattern) continue;
-    pattern.lastIndex = 0;
-    out = out.replace(pattern, (match) => ids.placeholders.get(pseudonymKey(match)) ?? match);
+  if (ids.hasGuids) {
+    GUID_TOKEN.lastIndex = 0;
+    out = out.replace(GUID_TOKEN, (match) => ids.placeholders.get(pseudonymKey(match)) ?? match);
+  }
+  if (ids.exactPattern) {
+    ids.exactPattern.lastIndex = 0;
+    out = out.replace(
+      ids.exactPattern,
+      (match) => ids.placeholders.get(pseudonymKey(match)) ?? match
+    );
   }
   return out;
 }
