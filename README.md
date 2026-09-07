@@ -161,6 +161,13 @@ small integer (see the limitation below). Add them per deployment if needed.
   characters containing a digit. An integer id such as `4711` also occurs as a
   duration or a count, so it is masked where it appears under (or next to) its
   property name, but not swept out of arbitrary free text.
+- **Case is significant for non-GUID identifiers.** The free-text sweep matches
+  GUIDs case-insensitively but anything else exactly, because that is what the
+  placeholder digest does: normalising the case of an opaque identifier could
+  merge two distinct ones into a single placeholder — a false "same patient".
+  The trade-off is that a non-GUID identifier repeated in free text in a
+  different casing is not swept; it is still masked under (and next to) its
+  property name.
 
 Redaction is built on the [`openredaction`](https://www.npmjs.com/package/openredaction)
 library (for email) plus Norwegian-tuned custom patterns (fødselsnummer/D-/H-/

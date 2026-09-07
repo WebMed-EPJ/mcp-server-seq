@@ -374,6 +374,51 @@ describe('pseudonymous identifier masking', () => {
     expect(out.RenderedMessage).toBe('Ferdig etter 4711 ms');
   });
 
+  it('keeps two non-GUID identifiers differing only by case apart', async () => {
+    // Regression: pass C used one case-insensitive pattern against a
+    // lower-cased lookup, which collapsed two distinct opaque identifiers into
+    // one placeholder — a false "same patient". Case is significant for
+    // anything but a GUID, matching what pseudonymKey hashes.
+    process.env.SEQ_PSEUDONYM_ID_PROPERTIES = 'CaseId';
+    const lower = 'ab12cd34ef56gh';
+    const upper = lower.toUpperCase();
+    const out = await redactDeep({
+      a: { CaseId: lower },
+      b: { CaseId: upper },
+      lowerMessage: `Behandler sak ${lower} nå`,
+      upperMessage: `Behandler sak ${upper} nå`,
+    });
+
+    expect(out.a.CaseId).not.toBe(out.b.CaseId);
+    // Each free-text occurrence gets ITS OWN identifier's placeholder.
+    expect(out.lowerMessage).toContain(out.a.CaseId);
+    expect(out.lowerMessage).not.toContain(out.b.CaseId);
+    expect(out.upperMessage).toContain(out.b.CaseId);
+    expect(out.upperMessage).not.toContain(out.a.CaseId);
+  });
+
+  it('still sweeps a GUID out of free text in any casing', async () => {
+    const out = await redactDeep({
+      Properties: { PatientId: PATIENT_GUID },
+      RenderedMessage: `Hentet journal for ${PATIENT_GUID.toUpperCase()}`,
+    });
+    expect(out.RenderedMessage).not.toContain(PATIENT_GUID.toUpperCase());
+    expect(out.RenderedMessage).toContain(out.Properties.PatientId);
+  });
+
+  it('masks an unserialisable value under an identifier property without throwing', async () => {
+    // JSON.stringify throws on a circular structure and on a nested BigInt; a
+    // throw on the redaction path would abort masking for the whole payload.
+    const circular: Record<string, unknown> = { Source: 'EPJ' };
+    circular.self = circular;
+    const circularOut = await redactDeep({ PatientId: circular, Level: 'Error' });
+    expect(circularOut.PatientId).toMatch(PLACEHOLDER);
+    expect(circularOut.Level).toBe('Error');
+
+    const bigIntOut = await redactDeep({ PatientId: { id: BigInt(42) } });
+    expect(bigIntOut.PatientId).toMatch(PLACEHOLDER);
+  });
+
   it('masks a non-scalar value under an identifier property (fail-closed)', async () => {
     const out = await redactDeep({ PatientId: { Id: PATIENT_GUID, Source: 'EPJ' } });
     expect(JSON.stringify(out)).not.toContain(PATIENT_GUID);

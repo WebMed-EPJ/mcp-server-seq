@@ -36543,9 +36543,17 @@ function pseudonymPlaceholder(value) {
 function maskIdentifierValue(value) {
   if (value === null || value === void 0) return value;
   if (typeof value === "string") return value === "" ? value : pseudonymPlaceholder(value);
-  if (typeof value === "object") return pseudonymPlaceholder(JSON.stringify(value) ?? "");
+  if (typeof value === "object") return pseudonymPlaceholder(identifierObjectText(value));
   return pseudonymPlaceholder(String(value));
 }
+function identifierObjectText(value) {
+  try {
+    return JSON.stringify(value) ?? UNSERIALISABLE_IDENTIFIER;
+  } catch {
+    return UNSERIALISABLE_IDENTIFIER;
+  }
+}
+var UNSERIALISABLE_IDENTIFIER = "\0unserialisable-identifier";
 function isDistinctiveIdValue(value) {
   if (value.length > MAX_ID_VALUE_LENGTH) return false;
   if (GUID_SHAPE.test(value)) return true;
@@ -36593,22 +36601,34 @@ function redactNamedIdentifiers(text) {
 }
 function compileCollectedIdentifiers(values) {
   const distinctive = [...values].filter(isDistinctiveIdValue).sort((a, b) => b.length - a.length);
-  if (distinctive.length === 0) return { pattern: null, placeholders: /* @__PURE__ */ new Map() };
   const placeholders = /* @__PURE__ */ new Map();
   for (const value of distinctive) {
-    placeholders.set(value.toLowerCase(), pseudonymPlaceholder(value));
+    placeholders.set(pseudonymKey(value), pseudonymPlaceholder(value));
   }
+  const guids = distinctive.filter((value) => GUID_SHAPE.test(value));
+  const others = distinctive.filter((value) => !GUID_SHAPE.test(value));
   return {
-    pattern: new RegExp(
-      `(?<![0-9A-Za-z])(?:${distinctive.map(escapeRegExp).join("|")})(?![0-9A-Za-z])`,
-      "gi"
-    ),
+    guidPattern: collectedValuePattern(guids, "gi"),
+    exactPattern: collectedValuePattern(others, "g"),
     placeholders
   };
 }
+function collectedValuePattern(values, flags) {
+  if (values.length === 0) return null;
+  return new RegExp(
+    `(?<![0-9A-Za-z])(?:${values.map(escapeRegExp).join("|")})(?![0-9A-Za-z])`,
+    flags
+  );
+}
 function redactCollectedIdentifiers(text, ids) {
-  if (!ids.pattern || !text) return text;
-  return text.replace(ids.pattern, (match) => ids.placeholders.get(match.toLowerCase()) ?? match);
+  if (!text) return text;
+  let out = text;
+  for (const pattern of [ids.guidPattern, ids.exactPattern]) {
+    if (!pattern) continue;
+    pattern.lastIndex = 0;
+    out = out.replace(pattern, (match) => ids.placeholders.get(pseudonymKey(match)) ?? match);
+  }
+  return out;
 }
 function pseudonymColumnIndexes(value) {
   const columns = value.Columns;

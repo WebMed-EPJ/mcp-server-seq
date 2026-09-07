@@ -465,9 +465,34 @@ export function pseudonymPlaceholder(value: string): string {
 function maskIdentifierValue(value: unknown): unknown {
   if (value === null || value === undefined) return value;
   if (typeof value === 'string') return value === '' ? value : pseudonymPlaceholder(value);
-  if (typeof value === 'object') return pseudonymPlaceholder(JSON.stringify(value) ?? '');
+  if (typeof value === 'object') return pseudonymPlaceholder(identifierObjectText(value));
   return pseudonymPlaceholder(String(value));
 }
+
+/**
+ * Serialise a non-scalar value found under an identifier property, for hashing.
+ *
+ * `JSON.stringify` THROWS on a circular structure or a nested `BigInt`. Seq's
+ * own payloads arrive from `response.json()` and can be neither, but this runs
+ * on the redaction path, so a throw here would abort redaction for an otherwise
+ * maskable payload — the one failure mode a privacy filter must not have. The
+ * fallback is fail-closed: the value is still masked, with a fixed marker in
+ * place of its text, so an unserialisable shape yields a placeholder rather
+ * than an exception (and never the value itself).
+ *
+ * @param value - The object or array stored under the identifier property
+ * @returns Its JSON form, or a fixed marker when it cannot be serialised
+ */
+function identifierObjectText(value: object): string {
+  try {
+    return JSON.stringify(value) ?? UNSERIALISABLE_IDENTIFIER;
+  } catch {
+    return UNSERIALISABLE_IDENTIFIER;
+  }
+}
+
+/** Hashed in place of a value that cannot be JSON-serialised. */
+const UNSERIALISABLE_IDENTIFIER = '\u0000unserialisable-identifier';
 
 /**
  * Whether an identifier value is distinctive enough to be searched for — and
@@ -602,14 +627,25 @@ function redactNamedIdentifiers(text: string): string {
 }
 
 /**
- * The identifier values collected from one response, compiled into a single
- * alternation so every string in the payload costs one regex pass rather than
- * one pass per identifier.
+ * The identifier values collected from one response, compiled into alternations
+ * so every string in the payload costs a fixed number of regex passes rather
+ * than one pass per identifier.
+ *
+ * There are two patterns rather than one because case significance differs by
+ * value shape, and pass C must agree with {@link pseudonymKey} on that: a GUID
+ * is the same identifier in any casing, while for any other opaque identifier a
+ * case difference may be a real difference. Matching everything
+ * case-insensitively against one lower-cased lookup would collapse two
+ * genuinely distinct non-GUID identifiers that differ only by case into one
+ * placeholder — exactly the false "same patient" the determinism guarantee
+ * exists to prevent.
  */
 interface CollectedIdentifiers {
-  /** Null when the response held no distinctive identifier value. */
-  pattern: RegExp | null;
-  /** Lower-cased value → placeholder, resolving a case-insensitive match. */
+  /** GUID-shaped values, matched case-insensitively. Null when there are none. */
+  guidPattern: RegExp | null;
+  /** Every other value, matched case-sensitively. Null when there are none. */
+  exactPattern: RegExp | null;
+  /** {@link pseudonymKey} of the value → placeholder. */
   placeholders: ReadonlyMap<string, string>;
 }
 
@@ -617,31 +653,46 @@ interface CollectedIdentifiers {
  * Compile the distinctive identifier values of a response for the free-text
  * sweep (pass C — see {@link redactDeep}).
  *
- * Longest first, so an identifier that contains a shorter one is masked as a
- * whole rather than hollowed out from the inside. Matching is case-insensitive
- * (a GUID is the same identifier in any casing) and fenced by alphanumeric
- * lookarounds so a value is never cut out of the middle of a longer token.
+ * Longest first within each pattern, so an identifier that contains a shorter
+ * one is masked as a whole rather than hollowed out from the inside. Both
+ * patterns are fenced by alphanumeric lookarounds so a value is never cut out
+ * of the middle of a longer token.
  *
  * @param values - Raw identifier values collected from the response
- * @returns The compiled pattern and its placeholder lookup
+ * @returns The compiled patterns and their shared placeholder lookup
  */
 function compileCollectedIdentifiers(values: Iterable<string>): CollectedIdentifiers {
   const distinctive = [...values]
     .filter(isDistinctiveIdValue)
     .sort((a, b) => b.length - a.length);
-  if (distinctive.length === 0) return { pattern: null, placeholders: new Map() };
 
   const placeholders = new Map<string, string>();
   for (const value of distinctive) {
-    placeholders.set(value.toLowerCase(), pseudonymPlaceholder(value));
+    placeholders.set(pseudonymKey(value), pseudonymPlaceholder(value));
   }
+
+  const guids = distinctive.filter((value) => GUID_SHAPE.test(value));
+  const others = distinctive.filter((value) => !GUID_SHAPE.test(value));
   return {
-    pattern: new RegExp(
-      `(?<![0-9A-Za-z])(?:${distinctive.map(escapeRegExp).join('|')})(?![0-9A-Za-z])`,
-      'gi',
-    ),
+    guidPattern: collectedValuePattern(guids, 'gi'),
+    exactPattern: collectedValuePattern(others, 'g'),
     placeholders,
   };
+}
+
+/**
+ * Build one fenced alternation over a set of collected identifier values.
+ *
+ * @param values - The values to match, longest first
+ * @param flags - Regex flags, deciding this pattern's case sensitivity
+ * @returns The pattern, or null when there are no values
+ */
+function collectedValuePattern(values: readonly string[], flags: string): RegExp | null {
+  if (values.length === 0) return null;
+  return new RegExp(
+    `(?<![0-9A-Za-z])(?:${values.map(escapeRegExp).join('|')})(?![0-9A-Za-z])`,
+    flags,
+  );
 }
 
 /**
@@ -650,13 +701,24 @@ function compileCollectedIdentifiers(values: Iterable<string>): CollectedIdentif
  * for 3fa85f64-…") is masked with the same placeholder as the structured field
  * it came from.
  *
+ * Both passes resolve the placeholder through {@link pseudonymKey}, the same
+ * normalisation the digest uses, so a case-insensitive GUID match and a
+ * case-sensitive match of anything else land on the identical placeholder the
+ * structural pass wrote.
+ *
  * @param text - The text to scan
  * @param ids - The compiled identifiers of the response
  * @returns The text with those values masked
  */
 function redactCollectedIdentifiers(text: string, ids: CollectedIdentifiers): string {
-  if (!ids.pattern || !text) return text;
-  return text.replace(ids.pattern, (match) => ids.placeholders.get(match.toLowerCase()) ?? match);
+  if (!text) return text;
+  let out = text;
+  for (const pattern of [ids.guidPattern, ids.exactPattern]) {
+    if (!pattern) continue;
+    pattern.lastIndex = 0;
+    out = out.replace(pattern, (match) => ids.placeholders.get(pseudonymKey(match)) ?? match);
+  }
+  return out;
 }
 
 /**

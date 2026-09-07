@@ -91,7 +91,15 @@ from `src/`. `esbuild` is pinned to an exact version so the bundle is byte-repro
   BODY, since that path calls `redactText` alone; (C) the values found by A/B swept out of
   every string in the SAME response, so a rendered message repeating the GUID gets the
   identical placeholder. Pass C is limited to distinctive values (GUID, or ≥12 chars with a
-  digit) — blanket-replacing a small integer id would corrupt durations and counts.
+  digit) — blanket-replacing a small integer id would corrupt durations and counts. Pass C uses
+  TWO patterns because its case sensitivity must AGREE with `pseudonymKey`: GUIDs match
+  case-insensitively, everything else exactly. Do not "simplify" that back to one case-insensitive
+  regex over a lower-cased lookup — two distinct opaque ids differing only by case then collapse into
+  one placeholder, the false "same patient" the determinism guarantee exists to prevent.
+- `maskIdentifierValue` serialises a non-scalar value through `identifierObjectText`, which CATCHES
+  `JSON.stringify` (it throws on a circular structure or a nested BigInt). Fail-closed: the value is
+  still masked, with a fixed marker hashed in place of its text. A throw on the redaction path would
+  abort masking for the whole payload — the one failure mode a privacy filter must not have.
 - Identifier placeholders are `[PSEUDONYM_<8 hex>]`, a SALTED digest whose salt defaults to a
   RANDOM per-process value. Do not "simplify" that to an unsalted hash: an unsalted digest is
   a stable pseudonym of the identifier, letting anyone with a candidate GUID confirm the
