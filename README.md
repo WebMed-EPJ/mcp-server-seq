@@ -51,6 +51,10 @@ The server requires the following environment variables:
 - `SEQ_BASE_URL` (optional): Your Seq server URL (defaults to 'http://localhost:8080')
 - `SEQ_API_KEY` (required): Your Seq API key
 - `SEQ_REDACTION_ENABLED` (optional): Set to `false` to disable PII redaction (defaults to enabled)
+- `SEQ_PSEUDONYM_ID_PROPERTIES` (optional): Extra property names whose values are masked as
+  pseudonymous identifiers, comma/space separated. Extends the built-in list; cannot shrink it
+- `SEQ_PSEUDONYM_SALT` (optional): Fixed salt for identifier placeholders. Default is random
+  per process — set it only if placeholders must be stable across restarts/replicas (secret)
 
 ## Privacy / PII Redaction
 
@@ -72,6 +76,65 @@ Masked data types:
   are intentionally treated as non-PII)
 - **Phone numbers** — Norwegian formats including `+47`/`0047`, space-grouped
   numbers and bare mobile numbers (prefix 4 or 9)
+- **Pseudonymous patient identifiers** — `PatientId` and friends, masked by the
+  property **name** they are logged under rather than by the shape of the value
+  (see below)
+
+### Pseudonymous identifiers
+
+A patient identifier such as `PatientId` is a GUID. It is not a name or a
+fødselsnummer, but it is still personal data under GDPR/Personvern (recital 26):
+it singles out one patient, and anyone with access to the EPJ database can
+re-identify them. It is therefore masked before the response leaves the server,
+so the identifier is never transferred.
+
+It cannot be recognised by its **value**: a correlation id, request id, tenant
+id or signal id is a GUID too, and masking every GUID would make the logs
+useless for debugging. So masking is keyed on the property **name**, in three
+passes — because the same identifier reaches the caller in shapes where the name
+is not next to the value:
+
+1. **Structural.** A value under an identifier property name is replaced
+   wholesale, whether the name is the object key (`{ "PatientId": … }`), the
+   `Name`/`PropertyName` member of a Seq name/value pair
+   (`{ "Name": "PatientId", "Value": … }`, which is how `/api/events` returns
+   event properties and message-template tokens), or a `Columns` header of a
+   `sql_query` rowset (where the name lives in a sibling array — a
+   `group by PatientId` would otherwise return a plain list of patient
+   identifiers). Fail-closed: a number, a boolean or even an object under such a
+   name is masked too, not walked into.
+2. **Name-anchored text.** `PatientId = '3fa8…'`, `"PatientId":"3fa8…"` or
+   `PatientId 3fa8…` inside a string. This needs no prior knowledge of the
+   value, so it also covers a Seq **error body** — which echoes the caller's own
+   filter and bypasses the structural walk. A bare (unquoted) value must contain
+   a digit, so `PatientId er ukjent` is left alone.
+3. **Value-anchored text.** Every identifier value found by passes 1–2 is then
+   swept out of every string in the **same response**, so a rendered message
+   that repeats the GUID without naming the property gets the identical
+   placeholder.
+
+Placeholders are deterministic: the same identifier always maps to the same
+`[PSEUDONYM_a1b2c3d4]` within a response, so an investigation can still see that
+two events concern the same patient. GUIDs are normalised (case, wrapping
+braces) so the same identifier written differently still matches.
+
+The digest is salted, and the salt defaults to a **random per-process value**.
+That is deliberate: an unsalted digest of a patient GUID would itself be a
+stable pseudonym derived from the identifier, so anyone holding a candidate GUID
+could hash it and confirm that the patient appears in an exported log excerpt.
+Set `SEQ_PSEUDONYM_SALT` to a fixed secret only if placeholders must stay stable
+across restarts and across replicas of the hosted server (e.g. when one
+investigation spans several tool calls served by different replicas) — and treat
+that value as a secret, since it is what makes the digests unverifiable.
+
+The built-in property names are `PatientId`, `PatientGuid`, `PatientKey`,
+`PatientUid` and the Norwegian spellings `PasientId`/`PasientGuid` (matched
+case-insensitively). `SEQ_PSEUDONYM_ID_PROPERTIES` **extends** that list; it
+cannot shrink it, so a misconfigured env var can never switch off masking of the
+patient identifier. `UserId`, `DoctorId` and `PractitionerId` are deliberately
+**not** masked by default: they identify WebMed staff rather than the data
+subject, they are load-bearing for everyday debugging, and `DoctorId` is often a
+small integer (see the limitation below). Add them per deployment if needed.
 
 ### Limitations
 
@@ -87,14 +150,40 @@ Masked data types:
   treated as mobile numbers, so an unrelated 8-digit value in a string (e.g.
   an order id) starting with those digits may be masked as a phone number.
   This is a deliberate privacy-first trade-off.
+- **Identifier masking is name-based.** An identifier logged under a property
+  name that is not on the list — or embedded in free text without naming its
+  property and without appearing in a recognised field anywhere in the same
+  response — is not masked. Extend `SEQ_PSEUDONYM_ID_PROPERTIES` for a service
+  that uses its own naming.
+- **Short numeric identifiers are masked in their field only.** The
+  value-anchored sweep (pass 3 above) runs only for values distinctive enough
+  not to collide with unrelated log text — a GUID, or a token of at least 12
+  characters containing a digit. An integer id such as `4711` also occurs as a
+  duration or a count, so it is masked where it appears under (or next to) its
+  property name, but not swept out of arbitrary free text.
+- **The free-text sweep is capped at 1 000 *non-GUID* identifiers per
+  response.** GUIDs — the shape `PatientId` actually has, and the only kind a
+  large `group by PatientId` rowset produces in bulk — are matched by shape at a
+  fixed cost and are **not** capped. The cap exists because an alternation built
+  from the values has to be compiled, and compilation grows with the value
+  count. It can therefore only bind on opaque non-GUID keys, which arrive a
+  handful at a time; such a value past the cap is still masked under its
+  property name and next to it in text, just not searched for elsewhere.
+- **Case is significant for non-GUID identifiers.** The free-text sweep matches
+  GUIDs case-insensitively but anything else exactly, because that is what the
+  placeholder digest does: normalising the case of an opaque identifier could
+  merge two distinct ones into a single placeholder — a false "same patient".
+  The trade-off is that a non-GUID identifier repeated in free text in a
+  different casing is not swept; it is still masked under (and next to) its
+  property name.
 
 Redaction is built on the [`openredaction`](https://www.npmjs.com/package/openredaction)
 library (for email) plus Norwegian-tuned custom patterns (fødselsnummer/D-/H-/
-FH-number, phone, name). It runs **entirely in-process** — no audit backend,
+FH-number, phone, name) and the name-based identifier passes above. It runs **entirely in-process** — no audit backend,
 metrics exporter, webhook or other network feature is enabled, so log content
 never leaves the server. Replacements are deterministic placeholders (e.g.
-`[FNR_1234]`, `[NAME_5678]`), so the same value maps to the same placeholder
-within a response. Non-personal numeric fields such as status codes, durations
+`[FNR_1234]`, `[NAME_5678]`, `[PSEUDONYM_a1b2c3d4]`), so the same value maps to
+the same placeholder within a response. Non-personal numeric fields such as status codes, durations
 and timestamps are preserved to keep logs useful for debugging.
 
 > **Note on the openredaction library.** Its English-centric context-analysis
@@ -210,6 +299,8 @@ In addition to `SEQ_BASE_URL` / `SEQ_API_KEY` (the remote server **requires**
 | `TRUST_PROXY_HOPS` | no | Reverse-proxy hop count for client-IP rate-limiting. Default `1`. Never set higher than the real hop count. |
 | `MAX_JSON_BODY` | no | Max `/mcp` request body. Default `1mb`. |
 | `SEQ_LOG_LEVEL` | no | `debug`/`info`/`warn`/`error`/`silent`. Default `info`. Logs to stderr; never logs the API key, bodies or PII. |
+| `SEQ_PSEUDONYM_ID_PROPERTIES` | no | Extra property names masked as pseudonymous identifiers (comma/space separated). Extends the built-in list, never shrinks it. |
+| `SEQ_PSEUDONYM_SALT` | no | Fixed salt for identifier placeholders. Default: random per process. Set it (as a **secret**) only when placeholders must be stable across restarts/replicas. |
 | `ENTRA_ALLOWED_CLIENT_IDS` | no | **Opt-in switch for machine-to-machine auth.** Comma/space-separated Entra app (client) IDs allowed to call `/mcp` with an app-only token (the token `azp`/`appid`). Unset = interactive-user login only. |
 | `ENTRA_AUDIENCE` | if M2M | Acceptable token audience(s) — set **both** this API app's Application ID URI (`api://…`) and its client-id GUID. Required when `ENTRA_ALLOWED_CLIENT_IDS` is set (fail-closed). |
 | `ENTRA_REQUIRED_ROLE` | no | App role the token must carry in `roles`. Default `Connector.Access`. |

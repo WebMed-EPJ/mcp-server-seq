@@ -81,6 +81,57 @@ from `src/`. `esbuild` is pinned to an exact version so the bundle is byte-repro
 - All log data returned from Seq passes through `redactDeep` (`src/redact.ts`) before
   leaving the server, masking Norwegian personal data: fødselsnummer (incl. D/H/FH-numbers),
   person names (curated dictionary), phone numbers, and emails.
+- **Pseudonymous patient identifiers** (`PatientId`, `PatientGuid`, …) are masked by the
+  property **NAME**, never by the value: they are GUIDs, identical in form to the
+  correlation/request/signal ids that must stay readable. Three passes, because the name is
+  not always next to the value: (A) structural — the object key, a Seq `{Name,Value}` /
+  `{PropertyName,FormattedValue}` pair, or a `sql_query` `Columns` header (the name sits in a
+  SIBLING array, so `group by PatientId` would otherwise return a list of patient ids);
+  (B) name-anchored text (`PatientId = '…'`), which is the only pass reaching a Seq ERROR
+  BODY, since that path calls `redactText` alone; (C) the values found by A/B swept out of
+  every string in the SAME response, so a rendered message repeating the GUID gets the
+  identical placeholder. Pass C is limited to distinctive values (GUID, or ≥12 chars with a
+  no whitespace) — blanket-replacing a small integer id would corrupt durations and counts. A digit is
+  NOT required: the value came from a CONFIRMED identifier property, so an alphabetic-only
+  `PatientKey` would otherwise stay in prose while its field was masked. Pass C uses
+  TWO patterns because its case sensitivity must AGREE with `pseudonymKey`: GUIDs match
+  case-insensitively, everything else exactly. Do not "simplify" that back to one case-insensitive
+  regex over a lower-cased lookup — two distinct opaque ids differing only by case then collapse into
+  one placeholder, the false "same patient" the determinism guarantee exists to prevent.
+- Pass C enters each collected GUID in the alternation in BOTH the braced and the bare form. Both
+  occur in the wild (.NET's `Guid.ToString("B")` writes `{3fa8…}`, the default writes it bare) and the
+  sweep is otherwise ASYMMETRIC: a bare value already matches inside braces (a brace passes the
+  alphanumeric lookarounds), but a value collected braced never matches a bare occurrence and leaves
+  it unmasked. `pseudonymKey` strips braces, so either form resolves to one placeholder.
+- Pass C sweeps GUIDs by SHAPE (`GUID_TOKEN`) and resolves the match through the collected-value map,
+  so its cost is INDEPENDENT of how many were collected and GUIDs are swept UNCAPPED. Only non-GUID
+  values get a per-value alternation, capped at `MAX_SWEEP_VALUES` (1 000), because compiling one is
+  SYNCHRONOUS and linear in the count (measured: ~4 ms at 1 000, ~550 ms at 100 000, ~2.3 s at
+  300 000) — an event-loop stall for every other user of the hosted server. Matching itself stays
+  cheap, so do not "optimise" the match path instead.
+- Do NOT cap the GUID sweep on the theory that a big rowset has no free text: `sql_query` takes
+  ARBITRARY columns, so `select PatientId, RenderedMessage …` carries an identifier column AND a
+  free-text column, and a capped sweep left the identifier standing in the message while its own
+  column was masked. (That reasoning was written into this file once and was wrong; there is a
+  regression test with 1 200 rows over both column kinds.)
+- `GUID_TOKEN` is anchored on the GUID's OWN structure, not on a greedy identifier character class.
+  A generic token scan whose class contains `-` swallows `abc-3fa85f64-…` as ONE token and then
+  fails to resolve it, leaving the GUID unmasked. Matching by shape is NOT masking by shape: a match
+  is replaced only when it resolves in the response's collected set, so an unrelated correlation id
+  stays readable (there is a test).
+- `maskIdentifierValue` serialises a non-scalar value through `identifierObjectText`, which CATCHES
+  `JSON.stringify` (it throws on a circular structure or a nested BigInt). Fail-closed: the value is
+  still masked, with a fixed marker hashed in place of its text. A throw on the redaction path would
+  abort masking for the whole payload — the one failure mode a privacy filter must not have.
+- Identifier placeholders are `[PSEUDONYM_<8 hex>]`, a SALTED digest whose salt defaults to a
+  RANDOM per-process value. Do not "simplify" that to an unsalted hash: an unsalted digest is
+  a stable pseudonym of the identifier, letting anyone with a candidate GUID confirm the
+  patient appears in an exported excerpt. `SEQ_PSEUDONYM_SALT` trades that away for stability
+  across restarts/replicas and is a SECRET. The `_` before the digest is load-bearing — it
+  denies the `\b`-anchored phone/fnr patterns a boundary inside a placeholder we just wrote.
+- `SEQ_PSEUDONYM_ID_PROPERTIES` EXTENDS the built-in identifier name list and can never shrink
+  it (same rule as the other WebMed connectors' privacy lists). `UserId`/`DoctorId`/
+  `PractitionerId` are deliberately absent by default: WebMed staff, not the data subject.
 - Enabled by default; set `SEQ_REDACTION_ENABLED=false` to disable (e.g. local debugging
   against an instance with no real personal data).
 - Redaction runs entirely in-process — no log content is sent anywhere.
