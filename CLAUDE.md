@@ -96,6 +96,11 @@ from `src/`. `esbuild` is pinned to an exact version so the bundle is byte-repro
   case-insensitively, everything else exactly. Do not "simplify" that back to one case-insensitive
   regex over a lower-cased lookup — two distinct opaque ids differing only by case then collapse into
   one placeholder, the false "same patient" the determinism guarantee exists to prevent.
+- Pass C enters each collected GUID in the alternation in BOTH the braced and the bare form. Both
+  occur in the wild (.NET's `Guid.ToString("B")` writes `{3fa8…}`, the default writes it bare) and the
+  sweep is otherwise ASYMMETRIC: a bare value already matches inside braces (a brace passes the
+  alphanumeric lookarounds), but a value collected braced never matches a bare occurrence and leaves
+  it unmasked. `pseudonymKey` strips braces, so either form resolves to one placeholder.
 - Pass C's value count is capped (`MAX_SWEEP_VALUES`, 1 000). `group by PatientId` returns one
   distinct id PER ROW, and the alternation's compilation is SYNCHRONOUS and linear in that count
   (measured: ~4 ms at 1 000, ~550 ms at 100 000, ~2.3 s at 300 000) — an event-loop stall for every

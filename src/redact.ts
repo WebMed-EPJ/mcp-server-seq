@@ -697,7 +697,25 @@ function compileCollectedIdentifiers(values: Iterable<string>): CollectedIdentif
     placeholders.set(pseudonymKey(value), pseudonymPlaceholder(value));
   }
 
-  const guids = distinctive.filter((value) => GUID_SHAPE.test(value));
+  // A GUID is the same identifier with or without its brace wrapper, and both
+  // forms occur: .NET's `Guid.ToString("B")` writes `{3fa8…}`, its default
+  // writes it bare. Each collected GUID therefore enters the alternation in
+  // BOTH forms, or the sweep would be asymmetric — a bare value already matches
+  // inside braces (a brace passes the alphanumeric lookarounds), but a value
+  // collected braced would never match a bare occurrence, leaving it unmasked.
+  // `pseudonymKey` strips the braces, so either form resolves to one
+  // placeholder. This at most doubles the branch count, which MAX_SWEEP_VALUES
+  // already bounds.
+  const guids = [
+    ...new Set(
+      distinctive
+        .filter((value) => GUID_SHAPE.test(value))
+        .flatMap((value) => {
+          const bare = value.replace(/[{}]/g, '');
+          return [`{${bare}}`, bare];
+        }),
+    ),
+  ].sort((a, b) => b.length - a.length);
   const others = distinctive.filter((value) => !GUID_SHAPE.test(value));
   return {
     guidPattern: collectedValuePattern(guids, 'gi'),

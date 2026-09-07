@@ -397,6 +397,31 @@ describe('pseudonymous identifier masking', () => {
     expect(out.upperMessage).not.toContain(out.a.CaseId);
   });
 
+  it('sweeps a bare occurrence of a GUID collected in braces', async () => {
+    // Regression: .NET's Guid.ToString("B") writes `{3fa8…}`. A value collected
+    // in that form only entered the alternation braced, so a BARE occurrence
+    // elsewhere in the response went unmasked. The reverse already worked (a
+    // brace passes the alphanumeric lookarounds), which made the sweep
+    // asymmetric.
+    const out = await redactDeep({
+      Properties: { PatientId: `{${PATIENT_GUID}}` },
+      RenderedMessage: `Hentet journal for ${PATIENT_GUID} pa 42 ms`,
+    });
+
+    expect(out.RenderedMessage).not.toContain(PATIENT_GUID);
+    expect(out.RenderedMessage).toContain(out.Properties.PatientId);
+    expect(out.RenderedMessage).toContain('42 ms');
+  });
+
+  it('sweeps a braced occurrence of a GUID collected bare', async () => {
+    const out = await redactDeep({
+      Properties: { PatientId: PATIENT_GUID },
+      RenderedMessage: `Hentet journal for {${PATIENT_GUID}}`,
+    });
+    expect(out.RenderedMessage).not.toContain(PATIENT_GUID);
+    expect(out.RenderedMessage).toContain(out.Properties.PatientId);
+  });
+
   it('still sweeps a GUID out of free text in any casing', async () => {
     const out = await redactDeep({
       Properties: { PatientId: PATIENT_GUID },

@@ -36606,7 +36606,14 @@ function compileCollectedIdentifiers(values) {
   for (const value of distinctive) {
     placeholders.set(pseudonymKey(value), pseudonymPlaceholder(value));
   }
-  const guids = distinctive.filter((value) => GUID_SHAPE.test(value));
+  const guids = [
+    ...new Set(
+      distinctive.filter((value) => GUID_SHAPE.test(value)).flatMap((value) => {
+        const bare = value.replace(/[{}]/g, "");
+        return [`{${bare}}`, bare];
+      })
+    )
+  ].sort((a, b) => b.length - a.length);
   const others = distinctive.filter((value) => !GUID_SHAPE.test(value));
   return {
     guidPattern: collectedValuePattern(guids, "gi"),
