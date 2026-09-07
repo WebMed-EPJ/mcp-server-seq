@@ -96,6 +96,12 @@ from `src/`. `esbuild` is pinned to an exact version so the bundle is byte-repro
   case-insensitively, everything else exactly. Do not "simplify" that back to one case-insensitive
   regex over a lower-cased lookup — two distinct opaque ids differing only by case then collapse into
   one placeholder, the false "same patient" the determinism guarantee exists to prevent.
+- Pass C's value count is capped (`MAX_SWEEP_VALUES`, 1 000). `group by PatientId` returns one
+  distinct id PER ROW, and the alternation's compilation is SYNCHRONOUS and linear in that count
+  (measured: ~4 ms at 1 000, ~550 ms at 100 000, ~2.3 s at 300 000) — an event-loop stall for every
+  other user of the hosted server. Matching itself stays cheap, so do not "optimise" the match path
+  instead. The cap is safe because the responses that collect thousands of ids are ROWSETS, whose ids
+  the STRUCTURAL pass masks cell by cell and which carry no free text to sweep.
 - `maskIdentifierValue` serialises a non-scalar value through `identifierObjectText`, which CATCHES
   `JSON.stringify` (it throws on a circular structure or a nested BigInt). Fail-closed: the value is
   still masked, with a fixed marker hashed in place of its text. A throw on the redaction path would

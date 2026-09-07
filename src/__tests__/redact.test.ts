@@ -461,6 +461,31 @@ describe('pseudonymous identifier masking', () => {
     expect(out.RenderedMessage).not.toContain('99 88 77 66');
   });
 
+  it('bounds the free-text sweep without leaving a rowset identifier unmasked', async () => {
+    // `group by PatientId` returns one distinct identifier per row, so the
+    // sweep's value count is otherwise unbounded and its (synchronous) pattern
+    // compilation grows with the row count. Capping it must not weaken the
+    // structural pass: every cell in the identifier column is still masked.
+    const rows = Array.from({ length: 2500 }, (_, i) => [
+      `3fa85f64-5717-4562-b3fc-${String(i).padStart(12, '0')}`,
+      i,
+    ]);
+    const started = Date.now();
+    const out = await redactDeep({ Columns: ['PatientId', 'count(*)'], Rows: rows });
+    const elapsed = Date.now() - started;
+
+    const serialized = JSON.stringify(out);
+    expect(serialized).not.toContain('3fa85f64-5717-4562-b3fc-');
+    expect(out.Rows).toHaveLength(2500);
+    expect(out.Rows[0][0]).toMatch(PLACEHOLDER);
+    expect(out.Rows[2499][0]).toMatch(PLACEHOLDER);
+    // Aggregates survive.
+    expect(out.Rows[2499][1]).toBe(2499);
+    // Generous, but an unbounded alternation over 2 500 values is an order of
+    // magnitude slower to compile than a capped one.
+    expect(elapsed).toBeLessThan(10_000);
+  });
+
   it('returns the payload untouched when redaction is disabled', async () => {
     process.env.SEQ_REDACTION_ENABLED = 'false';
     const event = { Properties: { PatientId: PATIENT_GUID } };

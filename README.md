@@ -161,6 +161,12 @@ small integer (see the limitation below). Add them per deployment if needed.
   characters containing a digit. An integer id such as `4711` also occurs as a
   duration or a count, so it is masked where it appears under (or next to) its
   property name, but not swept out of arbitrary free text.
+- **The free-text sweep is capped at 1 000 identifiers per response.** A
+  `group by PatientId` rowset returns one distinct identifier per row, and the
+  sweep's pattern compilation grows with that count. A value past the cap is
+  still masked where it appears — under its property name and next to it in
+  text — it is just not searched for elsewhere in the response. Where the cap
+  binds (large rowsets) there is no free text to sweep anyway.
 - **Case is significant for non-GUID identifiers.** The free-text sweep matches
   GUIDs case-insensitively but anything else exactly, because that is what the
   placeholder digest does: normalising the case of an opaque identifier could

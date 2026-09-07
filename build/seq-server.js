@@ -36513,6 +36513,7 @@ var PSEUDONYM_NAME_KEYS = ["name", "propertyname"];
 var PSEUDONYM_NAMED_VALUE_KEYS = ["value", "formattedvalue"];
 var GUID_SHAPE = /^\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}?$/i;
 var MAX_ID_VALUE_LENGTH = 256;
+var MAX_SWEEP_VALUES = 1e3;
 var idPropertiesCache = null;
 function pseudonymIdProperties() {
   const raw = process.env.SEQ_PSEUDONYM_ID_PROPERTIES ?? "";
@@ -36600,7 +36601,7 @@ function redactNamedIdentifiers(text) {
   );
 }
 function compileCollectedIdentifiers(values) {
-  const distinctive = [...values].filter(isDistinctiveIdValue).sort((a, b) => b.length - a.length);
+  const distinctive = [...values].filter(isDistinctiveIdValue).sort((a, b) => b.length - a.length).slice(0, MAX_SWEEP_VALUES);
   const placeholders = /* @__PURE__ */ new Map();
   for (const value of distinctive) {
     placeholders.set(pseudonymKey(value), pseudonymPlaceholder(value));

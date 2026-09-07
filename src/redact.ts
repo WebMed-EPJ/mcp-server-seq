@@ -349,6 +349,29 @@ const GUID_SHAPE = /^\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
  */
 const MAX_ID_VALUE_LENGTH = 256;
 
+/**
+ * Most identifier values the free-text sweep (pass C) will search for in one
+ * response.
+ *
+ * The sweep compiles the collected values into an alternation, and the number
+ * of values is otherwise unbounded: `select PatientId, count(*) … group by
+ * PatientId` returns one distinct identifier PER ROW, so a large rowset makes a
+ * large pattern. Measured on V8, matching stays cheap (the alternation is
+ * dispatched, not backtracked) but COMPILATION is synchronous and grows
+ * linearly — ~4 ms at 1 000 values, ~550 ms at 100 000, ~2.3 s at 300 000. On
+ * the hosted server that is an event-loop stall for every other user, so the
+ * count is capped.
+ *
+ * Capping costs nothing where it binds: the responses that collect thousands of
+ * identifiers are rowsets, whose identifiers are masked by the STRUCTURAL pass
+ * (their column is masked cell by cell) and which carry no free text for the
+ * sweep to clean. A value past the cap is therefore still masked where it
+ * appears — under its property name, and next to it in text — it is only not
+ * searched for elsewhere. 1 000 distinct identifiers in one response's prose is
+ * far beyond any real investigation.
+ */
+const MAX_SWEEP_VALUES = 1000;
+
 let idPropertiesCache: { raw: string; names: ReadonlySet<string> } | null = null;
 
 /**
@@ -654,9 +677,9 @@ interface CollectedIdentifiers {
  * sweep (pass C — see {@link redactDeep}).
  *
  * Longest first within each pattern, so an identifier that contains a shorter
- * one is masked as a whole rather than hollowed out from the inside. Both
- * patterns are fenced by alphanumeric lookarounds so a value is never cut out
- * of the middle of a longer token.
+ * one is masked as a whole rather than hollowed out from the inside, and capped
+ * at {@link MAX_SWEEP_VALUES}. Both patterns are fenced by alphanumeric
+ * lookarounds so a value is never cut out of the middle of a longer token.
  *
  * @param values - Raw identifier values collected from the response
  * @returns The compiled patterns and their shared placeholder lookup
@@ -664,7 +687,10 @@ interface CollectedIdentifiers {
 function compileCollectedIdentifiers(values: Iterable<string>): CollectedIdentifiers {
   const distinctive = [...values]
     .filter(isDistinctiveIdValue)
-    .sort((a, b) => b.length - a.length);
+    .sort((a, b) => b.length - a.length)
+    // Bounded so a large rowset cannot turn pass C into an event-loop stall —
+    // see MAX_SWEEP_VALUES for why dropping the tail is safe.
+    .slice(0, MAX_SWEEP_VALUES);
 
   const placeholders = new Map<string, string>();
   for (const value of distinctive) {
