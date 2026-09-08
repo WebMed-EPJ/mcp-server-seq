@@ -51,6 +51,8 @@ The server requires the following environment variables:
 - `SEQ_BASE_URL` (optional): Your Seq server URL (defaults to 'http://localhost:8080')
 - `SEQ_API_KEY` (required): Your Seq API key
 - `SEQ_REDACTION_ENABLED` (optional): Set to `false` to disable PII redaction (defaults to enabled)
+- `SEQ_REQUEST_TIMEOUT_MS` (optional): Per-request timeout for Seq API calls, in
+  milliseconds (defaults to `30000`). See [Query cost and timeouts](#query-cost-and-timeouts).
 
 ## Privacy / PII Redaction
 
@@ -306,6 +308,47 @@ options (`sql_query` defaults to `1d` / last 24h when none is given):
 - `7d` - Last 7 days
 - `14d` - Last 14 days
 - `30d` - Last 30 days
+
+Only these values are accepted — `4h`, `8h` and `3d` are rejected by the schema
+before a query runs. Use `fromDateUtc`/`toDateUtc` for any other window.
+
+## Query cost and timeouts
+
+Every Seq API call is bounded by `SEQ_REQUEST_TIMEOUT_MS` (default **30 s**). When
+it fires, the tool returns an error naming the query-shape levers that fix it —
+timeouts here are almost always a query that scanned too many events rather than
+an unreachable Seq.
+
+An aggregate (`sql_query`) has to scan every event in the window, so its cost
+tracks the window length times the ingest rate. Measured against WebMed
+production Seq (~1 million events per hour) with
+`select count(*) as n from stream group by @Level`:
+
+| `range` | events scanned | elapsed |
+|---------|----------------|---------|
+| `15m`   | ~0.4 M         | 1.5 s   |
+| `1h`    | ~1.2 M         | 2.6 s   |
+| `6h`    | ~4 M           | 8.2 s   |
+| `12h`   | ~8 M           | 11 s    |
+| `1d`    | ~26 M          | 11.5 s warm, over 30 s (timeout) on a cold cache |
+
+Practical consequences, all of which the `seq-ops` skill teaches the model:
+
+- **Set `range` explicitly on `sql_query`.** Its `1d` fallback is the most
+  expensive window available and is the most common cause of a timeout.
+- **A selective `where` pays for itself.** Filtering on `@Level` (and a tenant or
+  application) before grouping took the 6 h query above from 8.2 s to 2.6 s.
+- **`get_events` is cheap in a different way** — it scans newest-first and stops
+  once it has `count` matches, so a wide range costs little when matches are
+  common and a lot when they are rare.
+- **Raising `SEQ_REQUEST_TIMEOUT_MS` is rarely the fix.** The MCP client and, for
+  the hosted server, the ingress in front of `/mcp` impose their own budgets; once
+  one of those fires first the caller gets an opaque transport error instead of the
+  actionable timeout message. Keep this value comfortably under the client budget.
+
+Responses are also capped at 25 000 characters. Tabular `Rows`, time-sliced
+`Slices` and event lists are each trimmed to fit, with a message naming the
+remedy (a `limit`, a coarser `group by time(...)` bucket, or a lower `count`).
 
 ## Installation
 
