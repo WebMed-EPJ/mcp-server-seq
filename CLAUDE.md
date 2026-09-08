@@ -33,6 +33,32 @@ Requires Node.js >= 20 (see `engines` in package.json).
   Because `seq-server.ts` → `server.ts` never imports them, the esbuild stdio bundle stays free of
   them. The Docker image compiles `src/` with `tsc` (`build:server`) and ships prod `node_modules`
   (`npm ci --omit=dev`) — it is NOT esbuild-bundled.
+- **`src/truncate.ts`** — pure response-trimming + query-cost helpers (`truncateEventList`,
+  `truncateQueryResult`, `budgetWarning`, `CHARACTER_LIMIT`), imported by `server.ts` and unit-tested
+  without booting a transport. Two non-obvious things live here. (1) A `group by time(...)` query
+  answers with **`Slices`** and NO top-level `Rows`, so trimming that only looked at `Rows` let a
+  time series bypass the 25 000-character cap entirely — `group by time(5s)` over 1h measured 83 000
+  characters on prod. Keep both shapes handled. `Rows` are trimmed from the END (the query's
+  `order by` puts the significant ones first) while `Slices` are trimmed from the START (they arrive
+  oldest-first, and an incident is about the recent end); the message names a coarser `time()` bucket
+  as the remedy, because that returns the WHOLE window rather than a truncated one. (2) `budgetWarning`
+  flags a call that SUCCEEDED but spent ≥60% of `SEQ_REQUEST_TIMEOUT_MS`, returned as a separate
+  content block ahead of the payload — the same aggregate over the same 24h window measured 11.5s warm
+  and over 30s (timeout) cold, so "it worked" is not evidence the next widening will.
+- **Query cost is the timeout story.** `SEQ_REQUEST_TIMEOUT_MS` (default 30 000) bounds every Seq
+  call. Cost tracks events scanned = window × ingest rate, and prod ingests ~1M events/hour, so
+  `sql_query`'s 1d default window is itself at the ceiling. Do NOT "fix" timeouts by raising the
+  value: the MCP client and the ingress in front of `/mcp` have their own budgets, and once one of
+  those fires first the caller gets an opaque transport failure (`MCP server connection lost`)
+  instead of the timeout message, which is written FOR THE MODEL and names the query-shape ladder
+  (narrow the window → add a selective predicate → coarsen the rollup → switch tool). The measured
+  cost table lives in `README.md` and in the skill.
+- **Seq SQL rejects three things the tool descriptions used to demonstrate**, each with a `400`:
+  `order by count(*)` (label it — `count(*) as n … order by n`), selecting the grouping column
+  (`group by Environment` already emits it; selecting it returns it twice) and `count(distinct X)`
+  (needs `count(distinct(X))`). Verified against prod Seq. The `sql_query` description and the
+  `seq-ops` skill are what the model copies from, so an invalid example there costs a round trip on
+  every investigation — keep both correct.
 - **zod must be `^3.25`** (not `^3.24`): the SDK (`@modelcontextprotocol/sdk` `^1.29`) needs
   `zod ^3.25 || ^4.0`. With an older zod two copies install (project 3.x + the SDK's 4.x), and the
   `ZodRawShapeCompat` types in `server.tool(...)` blow up `tsc` (TS2589, multi-minute typecheck).

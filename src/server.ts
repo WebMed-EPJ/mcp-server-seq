@@ -2,6 +2,13 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { redactDeep, redactText } from "./redact.js";
 import { resolveDataRange } from "./timerange.js";
+import {
+  CHARACTER_LIMIT,
+  budgetWarning,
+  truncateEventList,
+  truncateQueryResult,
+  type SeqQueryResult,
+} from "./truncate.js";
 
 // Configuration and constants. Read from the environment once at module load so
 // both entry points — the stdio server (seq-server.ts) and the remote HTTP
@@ -11,12 +18,18 @@ import { resolveDataRange } from "./timerange.js";
 export const SEQ_BASE_URL = process.env.SEQ_BASE_URL || 'http://localhost:8080';
 export const SEQ_API_KEY = process.env.SEQ_API_KEY || '';
 const MAX_EVENTS = 50;
-const CHARACTER_LIMIT = 25_000;
 // Per-request timeout for Seq API calls. An unbounded fetch could keep a stdio
 // call — or a remote /mcp HTTP request — open indefinitely if Seq stalls.
 // Configurable via SEQ_REQUEST_TIMEOUT_MS (default 30s); a non-positive/NaN
 // value falls back to the default.
-const SEQ_REQUEST_TIMEOUT_MS = (() => {
+//
+// Raising it far above the default buys little: the MCP client and (for the
+// hosted server) the ingress in front of /mcp impose their own budgets, and
+// once one of those fires first the caller gets an opaque transport failure
+// instead of the actionable message below — so the recovery advice never
+// reaches the model. Keep this comfortably UNDER the client budget and let
+// query shape, not the timeout, be the thing that gets fixed.
+export const SEQ_REQUEST_TIMEOUT_MS = (() => {
   const raw = Number(process.env.SEQ_REQUEST_TIMEOUT_MS ?? '30000');
   return Number.isFinite(raw) && raw > 0 ? raw : 30000;
 })();
@@ -72,8 +85,22 @@ async function makeSeqRequest<T>(endpoint: string, params: Record<string, string
     });
   } catch (err) {
     if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+      // The recovery advice is aimed at the MODEL, which cannot change
+      // environment variables — so it names the query-shape levers that
+      // actually work, in the order that helps most. A timeout here is nearly
+      // always a query that scanned too many events, not an unreachable Seq.
       throw new Error(
-        `Seq request timed out after ${SEQ_REQUEST_TIMEOUT_MS}ms. The Seq server at ${SEQ_BASE_URL} did not respond in time; increase SEQ_REQUEST_TIMEOUT_MS or check that it is reachable.`,
+        `Seq request timed out after ${SEQ_REQUEST_TIMEOUT_MS}ms. Almost always this ` +
+        `means the query scanned too many events, NOT that Seq is down — cost scales ` +
+        `with the number of events in the time window (WebMed prod ingests roughly 1 ` +
+        `million events per hour). Do NOT retry the same query unchanged. Instead, in ` +
+        `this order: (1) narrow the window — step down 1d -> 6h -> 1h -> 15m; (2) add a ` +
+        `selective predicate (@Level in ['Error','Fatal'], Environment = '<tenant slug>', ` +
+        `Application = '<name>') so less has to be aggregated; (3) for a rollup, group at ` +
+        `a coarser level or add a 'limit'; (4) if you only need recent examples rather ` +
+        `than a count, use get_events with a small 'count' — it scans newest-first and ` +
+        `stops once it has enough matches. Only if a narrow 15m query also times out is ` +
+        `Seq itself likely unhealthy.`,
       );
     }
     throw err;
@@ -124,7 +151,7 @@ const eventsSchema = z.object({
   toDateUtc: z.string().datetime({ offset: true }).optional()
     .describe('End of time range in UTC ISO 8601, e.g. "2024-01-15T11:00:00Z"'),
   range: timeRangeSchema.optional()
-    .describe('Relative time range; takes precedence over fromDateUtc/toDateUtc. Options: 1m, 15m, 30m, 1h, 2h, 6h, 12h, 1d, 7d, 14d, 30d'),
+    .describe('Relative time range; takes precedence over fromDateUtc/toDateUtc. ONLY these values are accepted — 1m, 15m, 30m, 1h, 2h, 6h, 12h, 1d, 7d, 14d, 30d — anything else (4h, 8h, 3d) is rejected before the query runs; use fromDateUtc/toDateUtc for an arbitrary window. Defaults to 1h when omitted'),
   after: z.string().optional()
     .describe('Pagination cursor: pass the last event ID from a previous response to fetch the next page'),
   render: z.boolean().optional()
@@ -136,9 +163,13 @@ const dataSchema = z.object({
   query: z.string().min(1)
     .describe(
       "Seq SQL query. Use 'from stream' for tabular/aggregate queries, e.g. " +
-      "\"select count(*) from stream group by @Level\" or " +
-      "\"select RequestPath, count(*) from stream where StatusCode >= 500 group by RequestPath order by count(*) desc limit 20\". " +
-      "Supports aggregate operators (count, sum, mean, percentile, distinct) and time slicing via group by time(<n><unit>). " +
+      "\"select count(*) as n from stream group by @Level\" or " +
+      "\"select count(*) as n from stream where StatusCode >= 500 group by RequestPath order by n desc limit 20\". " +
+      "Three syntax rules Seq enforces (each rejects the query with 400 otherwise): " +
+      "LABEL an aggregate with 'as' to sort on it ('order by count(*)' is rejected — use 'count(*) as n ... order by n'); " +
+      "do NOT select the grouping column ('group by Environment' already emits it, and selecting it too returns it twice); " +
+      "and distinct takes parentheses ('count(distinct(UserId))', not 'count(distinct UserId)'). " +
+      "Aggregates: count, sum, mean, min, max, percentile, distinct; time slicing via group by time(<n><unit>). " +
       "Add a 'limit' clause to bound large rowsets."
     ),
   signal: z.string().optional()
@@ -148,7 +179,7 @@ const dataSchema = z.object({
   toDateUtc: z.string().datetime({ offset: true }).optional()
     .describe('End of time range in UTC ISO 8601, e.g. "2024-01-15T11:00:00Z"'),
   range: timeRangeSchema.optional()
-    .describe('Relative time range; takes precedence over fromDateUtc/toDateUtc. Options: 1m, 15m, 30m, 1h, 2h, 6h, 12h, 1d, 7d, 14d, 30d. Defaults to the last 24h (1d) when omitted')
+    .describe('Relative time range; takes precedence over fromDateUtc/toDateUtc. ONLY these values are accepted — 1m, 15m, 30m, 1h, 2h, 6h, 12h, 1d, 7d, 14d, 30d — anything else (4h, 8h, 3d) is rejected before the query runs; use fromDateUtc/toDateUtc for an arbitrary window. ALWAYS set this explicitly: the 1d fallback is the most expensive window there is and is the single most common cause of a timeout')
 }).strict();
 
 /**
@@ -244,15 +275,17 @@ export function createSeqServer(): McpServer {
   // Tool: Get events
   server.tool(
     "get_events",
-    `Retrieve structured log events from Seq. Use to investigate errors, analyze patterns, or monitor application health.
+    `Retrieve raw structured log events from Seq — the newest matches first. Use it to SEE example events (messages, stack traces, properties); use sql_query when the answer is a count or a breakdown.
+
+Cost: this scans newest-first and STOPS once it has 'count' matches, so a wide range is cheap when matches are common and expensive when they are rare (a filter matching nothing scans the whole window).
 
 Tips:
-- Call get_signals first to find signal IDs for targeted filtering
-- Start with a broad time range, then narrow using filter expressions
-- Filter expressions use Seq query syntax, e.g.: @Level = 'Error', StatusCode >= 500, RequestPath like '/api/%'
-- Combine signal + filter for precise results
-- Use render=true to get human-readable rendered messages instead of raw message templates
-- Use the 'after' parameter with the last event ID to page through large result sets`,
+- Keep 'count' small — 5 is usually enough to identify a pattern. One error event with a stack trace can be several thousand characters, so a large count is truncated anyway
+- Start narrow ('range: "1h"'), widen only if you find nothing
+- Filter expressions use Seq query syntax: @Level in ['Error','Fatal'], StatusCode >= 500, RequestPath like '/api/%', @Exception like '%TimeoutException%'
+- Call get_signals first to find signal IDs, and combine signal + filter for precise results
+- Use render=true for human-readable messages instead of raw message templates
+- Use 'after' with the last event ID to page through large result sets`,
     eventsSchema.shape,
     async ({ signal, filter, count, fromDateUtc, toDateUtc, range, after, render }) => {
       try {
@@ -273,44 +306,26 @@ Tips:
         if (after) params.after = after;
         if (render) params.render = 'true';
 
+        const startedAt = Date.now();
         const events = await makeSeqRequest<SeqEvent[]>('/api/events', params);
+        const durationMs = Date.now() - startedAt;
 
         // Redact personal data (fødselsnummer, names, email, phone) before the
         // events leave this process. Done up front so truncation operates on the
         // redacted payload and never re-exposes unredacted content.
         const safeEvents = await redactDeep(events);
 
-        let text = JSON.stringify(safeEvents, null, 2);
-        let truncated = false;
-        while (text.length > CHARACTER_LIMIT && safeEvents.length > 1) {
-          safeEvents.splice(Math.ceil(safeEvents.length / 2));
-          text = JSON.stringify(safeEvents, null, 2);
-          truncated = true;
-        }
+        const { text } = truncateEventList(safeEvents, CHARACTER_LIMIT);
 
-        if (truncated) {
-          // Measure the FINAL meta-wrapped payload, not the bare array: adding
-          // the truncated/returned/message fields can itself push the response
-          // back over the limit, so keep trimming against the wrapped form —
-          // same approach as sql_query below.
-          const withMeta = () => JSON.stringify({
-            truncated: true,
-            returned: safeEvents.length,
-            truncation_message: `Response exceeded ${CHARACTER_LIMIT} characters. Reduce 'count', narrow the time 'range', or add a 'filter' expression to get more targeted results.`,
-            events: safeEvents,
-          }, null, 2);
-          text = withMeta();
-          while (text.length > CHARACTER_LIMIT && safeEvents.length > 1) {
-            safeEvents.splice(Math.ceil(safeEvents.length / 2));
-            text = withMeta();
-          }
-        }
+        // A call that succeeded but nearly exhausted the budget is a warning
+        // the caller can act on BEFORE the next query times out. Kept as a
+        // separate content block so the JSON payload itself stays parseable.
+        const warning = budgetWarning(durationMs, SEQ_REQUEST_TIMEOUT_MS);
 
         return {
-          content: [{
-            type: "text",
-            text
-          }]
+          content: warning
+            ? [{ type: "text" as const, text: warning }, { type: "text" as const, text }]
+            : [{ type: "text" as const, text }]
         };
       } catch (error) {
         const err = error as Error;
@@ -359,16 +374,23 @@ Tips:
     "sql_query",
     `Run a Seq SQL-style query for aggregations and tabular analysis (https://datalust.co/docs/sql-queries).
 
-Use this — not get_events — when you need counts, sums, means, percentiles, distinct values, group-by breakdowns, or time-series. get_events returns raw rows; sql_query computes the aggregate server-side, avoiding pulling and counting rows client-side.
+Use this — not get_events — when you need counts, sums, means, percentiles, distinct values, group-by breakdowns, or time-series. get_events returns raw rows; sql_query computes the aggregate server-side.
 
-Examples:
-- Errors per service: select ServiceName, count(*) from stream where @Level = 'Error' group by ServiceName order by count(*) desc
-- p95 latency over time: select percentile(Elapsed, 95) from stream group by time(5m)
-- Top failing endpoints: select RequestPath, count(*) from stream where StatusCode >= 500 group by RequestPath order by count(*) desc limit 20
+Examples (note the labelled aggregate, and that the grouping column is NOT selected):
+- Errors per service: select count(*) as n from stream where @Level in ['Error','Fatal'] group by Application order by n desc limit 20
+- Errors per 5 minutes: select count(*) as n from stream where @Level = 'Error' group by time(5m)
+- p95 latency: select percentile(Elapsed, 95) as p95 from stream where RequestPath like '/api/%' group by RequestPath order by p95 desc limit 20
+- Distinct users affected: select count(distinct(UserId)) as users from stream where StatusCode >= 500
+
+COST — this is what makes queries time out. An aggregate scans every event in the window, so cost tracks window length, and WebMed prod ingests roughly 1 million events per hour. Measured on prod, 'group by @Level': 15m ~1.5s, 1h ~2.6s, 6h ~8s, 12h ~11s, 1d 11-30s+ — the same 1d query measured 11.5s warm and over 30s (timeout) cold. So:
+- ALWAYS set 'range' explicitly. Start at 15m-1h and widen only when you need to; the 1d default is the most expensive window available
+- Put a selective 'where' first (@Level in ['Error','Fatal'], Environment = '<slug>', Application = '<name>') — filtering before grouping cut a 6h query from 8.2s to 2.6s
+- Coarse buckets: group by time(5m) over an hour, not time(5s); a fine bucket over a wide window returns thousands of slices and gets truncated
+- For a long-horizon question, run several narrow windows or one coarse bucket rather than one wide fine-grained query
+- On a timeout, narrow the window — do not retry the same query
 
 Tips:
 - Call get_signals first to scope the query to a service/category via the 'signal' parameter
-- Default time window is the last 24h; set 'range' or fromDateUtc/toDateUtc to change it
 - Add a 'limit' clause to large rowsets, or group at a coarser level, if results are truncated`,
     dataSchema.shape,
     async ({ query, signal, fromDateUtc, toDateUtc, range }) => {
@@ -385,7 +407,9 @@ Tips:
         };
         if (signal) params.signal = signal;
 
-        const data = await makeSeqRequest<{ Rows?: unknown[] }>('/api/data', params);
+        const startedAt = Date.now();
+        const data = await makeSeqRequest<SeqQueryResult>('/api/data', params);
+        const durationMs = Date.now() - startedAt;
 
         // Redact personal data before the result leaves this process. The query
         // can select arbitrary columns (including @Properties holding
@@ -393,33 +417,17 @@ Tips:
         // rowset up front — same GDPR/Personvern guarantee as the other tools.
         const safeData = await redactDeep(data);
 
-        let text = JSON.stringify(safeData, null, 2);
-        // Tabular rowsets can be large; if the response exceeds the limit, trim
-        // the Rows array (when present) rather than returning nothing. The size is
-        // measured on the final meta-wrapped form (including the truncated/
-        // returnedRows/message fields) so the returned payload stays under the
-        // limit. A single oversized row can still exceed it — we keep one row
-        // rather than return an empty rowset, matching get_events.
-        if (text.length > CHARACTER_LIMIT && Array.isArray(safeData.Rows) && safeData.Rows.length > 1) {
-          const rows = safeData.Rows;
-          const withMeta = () => ({
-            truncated: true,
-            returnedRows: rows.length,
-            truncation_message: `Response exceeded ${CHARACTER_LIMIT} characters and rows were truncated. Add a 'limit' clause, narrow the time range, or group at a coarser level.`,
-            ...safeData
-          });
-          text = JSON.stringify(withMeta(), null, 2);
-          while (text.length > CHARACTER_LIMIT && rows.length > 1) {
-            rows.splice(Math.ceil(rows.length / 2));
-            text = JSON.stringify(withMeta(), null, 2);
-          }
-        }
+        // Trims a tabular `Rows` result AND a `group by time(...)` result, which
+        // answers with `Slices` and no top-level `Rows` at all — that shape used
+        // to bypass trimming entirely and return payloads several times the limit.
+        const { text } = truncateQueryResult(safeData, CHARACTER_LIMIT);
+
+        const warning = budgetWarning(durationMs, SEQ_REQUEST_TIMEOUT_MS);
 
         return {
-          content: [{
-            type: "text",
-            text
-          }]
+          content: warning
+            ? [{ type: "text" as const, text: warning }, { type: "text" as const, text }]
+            : [{ type: "text" as const, text }]
         };
       } catch (error) {
         const err = error as Error;
