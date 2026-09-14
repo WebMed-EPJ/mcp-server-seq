@@ -74,6 +74,9 @@ describe("withAccessLog", () => {
     await wrapped({ authInfo: authInfo({ homeAccountId: "user-2" }) });
 
     expect(lines).toHaveLength(1);
+    // A handler-reported failure must be logged at ERROR level, not INFO,
+    // so `SEQ_LOG_LEVEL=warn`/`error` doesn't silently drop it.
+    expect(lines[0]).toContain("ERROR");
     expect(lines[0]).toContain('"tool":"get_events"');
     expect(lines[0]).toContain('"caller":"user-2"');
     expect(lines[0]).toContain('"status":"error"');
@@ -96,6 +99,30 @@ describe("withAccessLog", () => {
     expect(lines[0]).toContain('"tool":"get_signals"');
     expect(lines[0]).toContain('"caller":"user-3"');
     expect(lines[0]).toContain('"status":"error"');
+    // The thrown error's message must never be logged — it can carry the Seq
+    // query or response content (see the errorName-only doc comment).
+    expect(lines[0]).not.toContain("unexpected failure");
+    expect(lines[0]).toContain('"errorName":"Error"');
+  });
+
+  it("logs a fixed 'error' status even when the thrown error carries an HTTP status code", async () => {
+    const lines: string[] = [];
+    const logger = createLogger({ sink: (l) => lines.push(l), now: () => "T" });
+    const handler = async (_extra: { authInfo?: AuthInfo }) => {
+      const err = new Error("upstream said no") as Error & { status: number };
+      err.status = 502;
+      throw err;
+    };
+
+    const wrapped = withAccessLog(logger, "sql_query", handler);
+
+    await expect(wrapped({ authInfo: authInfo({ homeAccountId: "user-4" }) })).rejects.toThrow();
+    // Regression test: a naive `...errorFields(err)` spread after `status:
+    // "error"` would let the HTTP status (a number) silently overwrite the
+    // access-log's own "ok"/"error" status field.
+    expect(lines[0]).toContain('"status":"error"');
+    expect(lines[0]).not.toContain('"status":502');
+    expect(lines[0]).not.toContain("upstream said no");
   });
 
   it('reports the caller as "stdio" when the handler is invoked with no authInfo (stdio entry point)', async () => {

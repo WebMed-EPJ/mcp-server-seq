@@ -155,7 +155,9 @@ the shared `SEQ_API_KEY`), so its calls are logged with the fixed caller
 
 Controlled by the same `SEQ_LOG_LEVEL` used for the HTTP access log (`debug`/
 `info`/`warn`/`error`/`silent`, default `info`); set it to `silent` to disable
-all logging, including this one.
+this and the other `Logger`-based access logs. A few pre-existing startup/error
+messages (e.g. in `seq-server.ts`) write to stderr via plain `console.error`
+and are not gated by `SEQ_LOG_LEVEL`.
 
 ## seq-ops Skill
 

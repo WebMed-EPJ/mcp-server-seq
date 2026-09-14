@@ -13445,16 +13445,6 @@ var silentLogger = createLogger({ level: "silent" });
 function loggerFromEnv() {
   return createLogger({ level: parseLogLevel(process.env.SEQ_LOG_LEVEL) });
 }
-function errorFields(err) {
-  if (err instanceof Error) {
-    const status = err.status;
-    if (typeof status === "number") {
-      return { errorName: err.name, status, error: `request failed (HTTP ${status})` };
-    }
-    return { error: err.message, errorName: err.name };
-  }
-  return { error: String(err) };
-}
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -21564,10 +21554,16 @@ function withAccessLog(logger2, name, handler) {
     try {
       const result = await handler(...args);
       const isError = Boolean(result && typeof result === "object" && result.isError);
-      logger2.info("tool call", { tool: name, caller, status: isError ? "error" : "ok", ms: Date.now() - startedAt });
+      const fields = { tool: name, caller, status: isError ? "error" : "ok", ms: Date.now() - startedAt };
+      if (isError) {
+        logger2.error("tool call", fields);
+      } else {
+        logger2.info("tool call", fields);
+      }
       return result;
     } catch (err) {
-      logger2.error("tool call", { tool: name, caller, status: "error", ms: Date.now() - startedAt, ...errorFields(err) });
+      const errorName = err instanceof Error ? err.name : "UnknownError";
+      logger2.error("tool call", { tool: name, caller, ms: Date.now() - startedAt, errorName, status: "error" });
       throw err;
     }
   };
