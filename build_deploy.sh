@@ -6,6 +6,6 @@ docker push harbor.k8s.webmedepj.no:443/webmed/seq-test-mcp:latest
 kubectl --context juju-context-test rollout restart -n webmed-admin deployment/seq-mcp-test
 
 # ── prod (juju-context) → https://seq-mcp.public.webmed.no, upstream seq.intern.webmed.no ──
-docker tag  webmed-seq-connector harbor.k8s.webmedepj.no:443/webmed/seq-prod-mcp:latest
-docker push harbor.k8s.webmedepj.no:443/webmed/seq-prod-mcp:latest
+docker tag  webmed-seq-connector harbor.k8s.webmed.no:443/webmed/seq-prod-mcp:latest
+docker push harbor.k8s.webmed.no:443/webmed/seq-prod-mcp:latest
 kubectl --context juju-context rollout restart -n webmed-admin deployment/seq-mcp-prod
