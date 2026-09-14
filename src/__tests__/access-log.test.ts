@@ -62,6 +62,23 @@ describe("withAccessLog", () => {
     );
   });
 
+  it("logs a caller-supplied human identity separately from the authenticated caller", async () => {
+    const lines: string[] = [];
+    const logger = createLogger({ sink: (l) => lines.push(l), now: () => "T" });
+    const handler = async (_args: { triggered_by_user: string }, _extra: { authInfo?: AuthInfo }) => ({
+      content: [],
+    });
+
+    const wrapped = withAccessLog(logger, "get_signals", handler);
+    await wrapped(
+      { triggered_by_user: "  jane.doe  " },
+      { authInfo: authInfo({ homeAccountId: "service:claude-tag" }) },
+    );
+
+    expect(lines[0]).toContain('"caller":"service:claude-tag"');
+    expect(lines[0]).toContain('"triggeredByUser":"jane.doe"');
+  });
+
   it("logs status ok/error based on the tool's own isError result (no throw)", async () => {
     const lines: string[] = [];
     const logger = createLogger({ sink: (l) => lines.push(l), now: () => "T" });

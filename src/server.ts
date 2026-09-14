@@ -130,8 +130,11 @@ async function makeSeqRequest<T>(endpoint: string, params: Record<string, string
 
 // Schema for time range validation
 const timeRangeSchema = z.enum(['1m', '15m', '30m', '1h', '2h', '6h', '12h', '1d', '7d', '14d', '30d']);
+const triggeredByUserSchema = z.string().trim().min(1).max(256)
+  .describe('Human user who triggered this call; required for shared service-account clients');
 
 const signalsSchema = z.object({
+  triggered_by_user: triggeredByUserSchema,
   ownerId: z.string().optional()
     .describe('Filter signals by owner ID'),
   shared: z.boolean().optional()
@@ -141,6 +144,7 @@ const signalsSchema = z.object({
 }).strict();
 
 const eventsSchema = z.object({
+  triggered_by_user: triggeredByUserSchema,
   signal: z.string().optional()
     .describe('Comma-separated signal IDs to scope results (get IDs from seq_get_signals)'),
   filter: z.string().optional()
@@ -162,6 +166,7 @@ const eventsSchema = z.object({
 }).strict();
 
 const dataSchema = z.object({
+  triggered_by_user: triggeredByUserSchema,
   query: z.string().min(1)
     .describe(
       "Seq SQL query. Use 'from stream' for tabular/aggregate queries, e.g. " +
@@ -354,7 +359,7 @@ Tips:
   server.tool(
     "get_alert_state",
     "Get the current state of all Seq alerts. Returns firing, ok, or suppressed status for each configured alert.",
-    {},
+    { triggered_by_user: triggeredByUserSchema },
     withAccessLog(logger, "get_alert_state", async () => {
       try {
         const alertState = await makeSeqRequest<Record<string, unknown>>('/api/alertstate');

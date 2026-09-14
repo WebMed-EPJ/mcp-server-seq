@@ -124,13 +124,15 @@ this is an **access log**, not a debug trace, so it never contains the tool's
 arguments or its result:
 
 ```
-2026-01-15T10:22:31.512Z INFO tool call {"tool":"sql_query","caller":"9f2c...ab31.18a...","status":"ok","ms":412}
+2026-01-15T10:22:31.512Z INFO tool call {"tool":"sql_query","caller":"service:claude-tag","triggeredByUser":"jane.doe","status":"ok","ms":412}
 ```
 
 Each line records:
 
 - **when** — timestamp (added by the logger)
 - **who** — `caller`, a stable per-user identifier (see below)
+- **human caller** — `triggeredByUser`, supplied by the calling client for
+  shared service-account connections such as Claude Tag
 - **what** — `tool`, the MCP tool/resource name
 - **result** — `status`, `"ok"` or `"error"` (a thrown exception or a tool
   result with `isError: true` both count as `"error"`)
@@ -142,6 +144,11 @@ query text and log content out of the access log mirrors the redaction
 discipline above — the whole point of that redaction is to keep personal data
 inside Seq's own log content from leaving the process unmasked, so the access
 log must not become a side channel that reintroduces it.
+
+All Seq tools require a non-empty `triggered_by_user` value. This is a
+caller-supplied audit label for shared service-account clients, not an
+authenticated identity claim; the authenticated Entra/service identity remains
+in `caller`.
 
 **Caller identity (`caller`):** on the remote (HTTP) server, an interactive
 user is identified by their Entra `homeAccountId` — a stable, per-user

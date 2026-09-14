@@ -29,6 +29,10 @@
  * logged as-is. The stdio entry point has no per-request auth at all — a
  * single local operator sits behind the shared SEQ_API_KEY — so it is
  * reported as the fixed caller "stdio" rather than left blank.
+ *
+ * `triggeredByUser` is a caller-supplied identity for shared service-account
+ * clients (for example Claude Tag). It is logged separately from the
+ * authenticated `caller` and must not be treated as proof of identity.
  */
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import type { Logger } from "./logger.js";
@@ -47,6 +51,14 @@ export function callerId(authInfo: AuthInfo | undefined): string {
 // `any` is required here to accept every tool/resource callback shape.
 type AnyHandler = (...args: any[]) => any;
 
+function triggeredByUser(args: unknown): string | undefined {
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    return undefined;
+  }
+  const value = (args as Record<string, unknown>).triggered_by_user;
+  return typeof value === "string" && value.trim() ? value.trim().slice(0, 256) : undefined;
+}
+
 /**
  * Wrap an MCP tool/resource handler so every call is access-logged. `extra`
  * (carrying `authInfo`) is always the LAST argument passed to an MCP handler,
@@ -58,11 +70,18 @@ export function withAccessLog<T extends AnyHandler>(logger: Logger, name: string
   const wrapped = async (...args: Parameters<T>): Promise<Awaited<ReturnType<T>>> => {
     const extra = args[args.length - 1] as { authInfo?: AuthInfo } | undefined;
     const caller = callerId(extra?.authInfo);
+    const humanCaller = triggeredByUser(args[0]);
     const startedAt = Date.now();
     try {
       const result = await handler(...args);
       const isError = Boolean(result && typeof result === "object" && (result as { isError?: unknown }).isError);
-      const fields = { tool: name, caller, status: isError ? "error" : "ok", ms: Date.now() - startedAt };
+      const fields = {
+        tool: name,
+        caller,
+        ...(humanCaller ? { triggeredByUser: humanCaller } : {}),
+        status: isError ? "error" : "ok",
+        ms: Date.now() - startedAt,
+      };
       // A handler-reported failure (isError) is logged at the same level as a
       // thrown one, so `SEQ_LOG_LEVEL=warn`/`error` doesn't silently drop it.
       if (isError) {
@@ -79,7 +98,14 @@ export function withAccessLog<T extends AnyHandler>(logger: Logger, name: string
       // (a fixed, safe type tag like "TypeError") is logged; `status: "error"`
       // is set last so it can never be shadowed by another field.
       const errorName = err instanceof Error ? err.name : "UnknownError";
-      logger.error("tool call", { tool: name, caller, ms: Date.now() - startedAt, errorName, status: "error" });
+      logger.error("tool call", {
+        tool: name,
+        caller,
+        ...(humanCaller ? { triggeredByUser: humanCaller } : {}),
+        ms: Date.now() - startedAt,
+        errorName,
+        status: "error",
+      });
       throw err;
     }
   };
