@@ -1,5 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { withAccessLog } from "./access-log.js";
+import { loggerFromEnv, type Logger } from "./logger.js";
 import { redactDeep, redactText } from "./redact.js";
 import { resolveDataRange } from "./timerange.js";
 import {
@@ -188,8 +190,16 @@ const dataSchema = z.object({
  * this so the two transports expose an identical tool surface. The remote server
  * builds a fresh instance per request (stateless Streamable HTTP), so this must
  * be cheap and side-effect free beyond registering handlers.
+ *
+ * `logger` defaults to `loggerFromEnv()` so a caller that doesn't care (tests,
+ * ad-hoc scripts) gets sane behaviour for free; `seq-server.ts` and
+ * `remote.ts` each pass their own already-constructed logger so every log
+ * line — HTTP access log, tool-call access log — shares one instance.
+ * Every resource read and tool call is wrapped with `withAccessLog` so WHO
+ * (the authenticated caller) did WHAT (the tool/resource name) is always
+ * logged, without ever logging the call's arguments or result.
  */
-export function createSeqServer(): McpServer {
+export function createSeqServer(logger: Logger = loggerFromEnv()): McpServer {
   const server = new McpServer({
     name: "seq-mcp-server",
     version: "1.0.0"
@@ -202,7 +212,7 @@ export function createSeqServer(): McpServer {
     {
       description: "List of saved Seq signals that can be used with seq_get_events to filter log events by category or service"
     },
-    async () => {
+    withAccessLog(logger, "signals", async () => {
       try {
         const signals = await makeSeqRequest<Signal[]>('/api/signals', { shared: 'true' });
         const formattedSignals = signals.map(signal => ({
@@ -225,7 +235,7 @@ export function createSeqServer(): McpServer {
         console.error('Error fetching signals:', error);
         throw error;
       }
-    }
+    })
   );
 
   // Tool: List signals
@@ -233,7 +243,7 @@ export function createSeqServer(): McpServer {
     "get_signals",
     "List saved Seq signals (named filters). Use signal IDs with get_events to narrow results to a specific service or category.",
     signalsSchema.shape,
-    async ({ ownerId, shared, partial }) => {
+    withAccessLog(logger, "get_signals", async ({ ownerId, shared, partial }) => {
       try {
         const params: Record<string, string> = {
           shared: shared?.toString() ?? "true"
@@ -269,7 +279,7 @@ export function createSeqServer(): McpServer {
           isError: true
         };
       }
-    }
+    })
   );
 
   // Tool: Get events
@@ -287,7 +297,7 @@ Tips:
 - Use render=true for human-readable messages instead of raw message templates
 - Use 'after' with the last event ID to page through large result sets`,
     eventsSchema.shape,
-    async ({ signal, filter, count, fromDateUtc, toDateUtc, range, after, render }) => {
+    withAccessLog(logger, "get_events", async ({ signal, filter, count, fromDateUtc, toDateUtc, range, after, render }) => {
       try {
         const params: Record<string, string> = {};
 
@@ -337,7 +347,7 @@ Tips:
           isError: true
         };
       }
-    }
+    })
   );
 
   // Tool: Get alert state
@@ -345,7 +355,7 @@ Tips:
     "get_alert_state",
     "Get the current state of all Seq alerts. Returns firing, ok, or suppressed status for each configured alert.",
     {},
-    async () => {
+    withAccessLog(logger, "get_alert_state", async () => {
       try {
         const alertState = await makeSeqRequest<Record<string, unknown>>('/api/alertstate');
         const safeAlertState = await redactDeep(alertState);
@@ -366,7 +376,7 @@ Tips:
           isError: true
         };
       }
-    }
+    })
   );
 
   // Tool: Run a SQL-style query (aggregations)
@@ -393,7 +403,7 @@ Tips:
 - Call get_signals first to scope the query to a service/category via the 'signal' parameter
 - Add a 'limit' clause to large rowsets, or group at a coarser level, if results are truncated`,
     dataSchema.shape,
-    async ({ query, signal, fromDateUtc, toDateUtc, range }) => {
+    withAccessLog(logger, "sql_query", async ({ query, signal, fromDateUtc, toDateUtc, range }) => {
       try {
         const { rangeStartUtc, rangeEndUtc } = resolveDataRange(
           { range, fromDateUtc, toDateUtc },
@@ -439,7 +449,7 @@ Tips:
           isError: true
         };
       }
-    }
+    })
   );
 
   return server;

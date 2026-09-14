@@ -155,7 +155,10 @@ async function main(): Promise<void> {
   // bearer means an authenticated WebMed user; redactDeep still scrubs PII from
   // every log response inside the tools regardless of who is signed in.
   app.post("/mcp", bearer, async (req, res) => {
-    const server = createSeqServer();
+    // Pass the module-level logger so the tool-call access log (WHO called
+    // WHAT, see access-log.ts) shares the same instance/level as the HTTP
+    // access log below, instead of each request building its own.
+    const server = createSeqServer(logger);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on("close", () => {
       transport.close();
