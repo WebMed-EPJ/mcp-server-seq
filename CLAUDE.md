@@ -13,13 +13,25 @@
 Requires Node.js >= 20 (see `engines` in package.json).
 
 ## Two entry points (stdio + remote HTTP)
-- **`src/seq-server.ts`** — the **stdio** entry point. Thin: reads env, calls `createSeqServer()`,
+- **`src/seq-server.ts`** — the **stdio** entry point. Thin: reads env, calls `createSeqServer(logger)`,
   connects a `StdioServerTransport`. This is what gets esbuild-bundled into `build/seq-server.js`
   and run by the `claude-plugins` `seq-ops` plugin. Stays **dependency-free** (no express/msal).
-- **`src/server.ts`** — `createSeqServer()`, the shared server factory: registers all tools/resources
+- **`src/server.ts`** — `createSeqServer(logger)`, the shared server factory: registers all tools/resources
   (`get_signals`, `get_events`, `get_alert_state`, `sql_query`, `signals` resource) and reads the
   `SEQ_BASE_URL`/`SEQ_API_KEY` upstream config. Both entry points use it, so they expose an identical
-  tool surface and the same `redactDeep` PII guarantee.
+  tool surface and the same `redactDeep` PII guarantee. `logger` defaults to `loggerFromEnv()` if
+  omitted; both entry points pass their own instance explicitly so the tool-call access log (below)
+  shares the same logger/level as each entry point's other logging.
+- **`src/access-log.ts`** — `withAccessLog(logger, name, handler)` wraps every tool/resource callback
+  registered in `server.ts` to emit a structured access-log line per call: `tool`, `caller`,
+  `status` (`ok`/`error`, from either a thrown error or an `isError: true` result), and `ms`
+  (duration) — timestamp comes from the logger itself. Deliberately **never** logs the call's
+  arguments (Seq query text, filters) or its result (log content) — same discipline as `redact.ts`.
+  `callerId(authInfo)` derives `caller` from `AuthInfo.extra.homeAccountId` (interactive users) or
+  the existing `service:<clientId>` marker (M2M callers, see `service-auth.ts`); with no `AuthInfo`
+  at all (the stdio entry point, which has no per-request auth) it reports the fixed caller `"stdio"`.
+  `AuthInfo`/`extra` is always the LAST positional argument to any MCP tool/resource callback
+  regardless of its declared arity, which is what makes one generic wrapper work for all of them.
 - **`src/remote.ts`** — the **remote HTTP** entry point (Docker). Serves the same tools over an
   OAuth-protected **Streamable HTTP** `/mcp` endpoint (Express). Authorization is a full OAuth 2.1
   flow (DCR + PKCE) federated to **Microsoft Entra** — the same model as the WebMed Lime/m365

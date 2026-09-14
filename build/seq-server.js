@@ -4831,13 +4831,13 @@ var require_core = __commonJS({
     }, warn() {
     }, error() {
     } };
-    function getLogger(logger) {
-      if (logger === false)
+    function getLogger(logger2) {
+      if (logger2 === false)
         return noLogs;
-      if (logger === void 0)
+      if (logger2 === void 0)
         return console;
-      if (logger.log && logger.warn && logger.error)
-        return logger;
+      if (logger2.log && logger2.warn && logger2.error)
+        return logger2;
       throw new Error("logger must implement log, warn and error methods");
     }
     var KEYWORD_NAME = /^[a-z_$][a-z0-9_$:-]*$/i;
@@ -13398,6 +13398,64 @@ var StdioServerTransport = class {
   );
 })();
 
+// src/logger.ts
+var LEVEL_RANK = {
+  debug: 10,
+  info: 20,
+  warn: 30,
+  error: 40,
+  silent: 100
+};
+function parseLogLevel(raw) {
+  const value = (raw ?? "").trim().toLowerCase();
+  switch (value) {
+    case "debug":
+    case "info":
+    case "warn":
+    case "error":
+    case "silent":
+      return value;
+    default:
+      return "info";
+  }
+}
+function createLogger(options = {}) {
+  const threshold = LEVEL_RANK[options.level ?? "info"];
+  const sink = options.sink ?? ((line) => process.stderr.write(line + "\n"));
+  const name = options.name ?? "WebMed Seq connector";
+  const now = options.now ?? (() => (/* @__PURE__ */ new Date()).toISOString());
+  const emit = (level, message, fields) => {
+    if (LEVEL_RANK[level] < threshold) {
+      return;
+    }
+    let line = `${now()} [${name}] ${level.toUpperCase().padEnd(5)} ${message}`;
+    if (fields && Object.keys(fields).length > 0) {
+      line += " " + JSON.stringify(fields);
+    }
+    sink(line);
+  };
+  return {
+    debug: (message, fields) => emit("debug", message, fields),
+    info: (message, fields) => emit("info", message, fields),
+    warn: (message, fields) => emit("warn", message, fields),
+    error: (message, fields) => emit("error", message, fields)
+  };
+}
+var silentLogger = createLogger({ level: "silent" });
+function loggerFromEnv() {
+  return createLogger({ level: parseLogLevel(process.env.SEQ_LOG_LEVEL) });
+}
+function errorFields(err) {
+  if (err instanceof Error) {
+    const status = err.status;
+    if (typeof status === "number") {
+      return { errorName: err.name, status, error: `request failed (HTTP ${status})` };
+    }
+    return { error: err.message, errorName: err.name };
+  }
+  return { error: String(err) };
+}
+
 // node_modules/zod/v3/external.js
 var external_exports = {};
 __export(external_exports, {
@@ -21488,6 +21546,33 @@ var EMPTY_COMPLETION_RESULT = {
     hasMore: false
   }
 };
+
+// src/access-log.ts
+function callerId(authInfo) {
+  const extra = authInfo?.extra;
+  const homeAccountId = extra && typeof extra === "object" ? extra.homeAccountId : void 0;
+  if (typeof homeAccountId === "string" && homeAccountId) {
+    return homeAccountId;
+  }
+  return authInfo ? "unknown" : "stdio";
+}
+function withAccessLog(logger2, name, handler) {
+  const wrapped = async (...args) => {
+    const extra = args[args.length - 1];
+    const caller = callerId(extra?.authInfo);
+    const startedAt = Date.now();
+    try {
+      const result = await handler(...args);
+      const isError = Boolean(result && typeof result === "object" && result.isError);
+      logger2.info("tool call", { tool: name, caller, status: isError ? "error" : "ok", ms: Date.now() - startedAt });
+      return result;
+    } catch (err) {
+      logger2.error("tool call", { tool: name, caller, status: "error", ms: Date.now() - startedAt, ...errorFields(err) });
+      throw err;
+    }
+  };
+  return wrapped;
+}
 
 // node_modules/openredaction/dist/index.mjs
 import { createRequire } from "node:module";
@@ -36754,7 +36839,7 @@ var dataSchema = external_exports.object({
   toDateUtc: external_exports.string().datetime({ offset: true }).optional().describe('End of time range in UTC ISO 8601, e.g. "2024-01-15T11:00:00Z"'),
   range: timeRangeSchema.optional().describe("Relative time range; takes precedence over fromDateUtc/toDateUtc. ONLY these values are accepted \u2014 1m, 15m, 30m, 1h, 2h, 6h, 12h, 1d, 7d, 14d, 30d \u2014 anything else (4h, 8h, 3d) is rejected before the query runs; use fromDateUtc/toDateUtc for an arbitrary window. ALWAYS set this explicitly: the 1d fallback is the most expensive window there is and is the single most common cause of a timeout")
 }).strict();
-function createSeqServer() {
+function createSeqServer(logger2 = loggerFromEnv()) {
   const server2 = new McpServer({
     name: "seq-mcp-server",
     version: "1.0.0"
@@ -36765,7 +36850,7 @@ function createSeqServer() {
     {
       description: "List of saved Seq signals that can be used with seq_get_events to filter log events by category or service"
     },
-    async () => {
+    withAccessLog(logger2, "signals", async () => {
       try {
         const signals = await makeSeqRequest("/api/signals", { shared: "true" });
         const formattedSignals = signals.map((signal) => ({
@@ -36786,13 +36871,13 @@ function createSeqServer() {
         console.error("Error fetching signals:", error2);
         throw error2;
       }
-    }
+    })
   );
   server2.tool(
     "get_signals",
     "List saved Seq signals (named filters). Use signal IDs with get_events to narrow results to a specific service or category.",
     signalsSchema.shape,
-    async ({ ownerId, shared, partial: partial2 }) => {
+    withAccessLog(logger2, "get_signals", async ({ ownerId, shared, partial: partial2 }) => {
       try {
         const params = {
           shared: shared?.toString() ?? "true"
@@ -36825,7 +36910,7 @@ function createSeqServer() {
           isError: true
         };
       }
-    }
+    })
   );
   server2.tool(
     "get_events",
@@ -36841,7 +36926,7 @@ Tips:
 - Use render=true for human-readable messages instead of raw message templates
 - Use 'after' with the last event ID to page through large result sets`,
     eventsSchema.shape,
-    async ({ signal, filter, count, fromDateUtc, toDateUtc, range, after, render }) => {
+    withAccessLog(logger2, "get_events", async ({ signal, filter, count, fromDateUtc, toDateUtc, range, after, render }) => {
       try {
         const params = {};
         if (range) {
@@ -36876,13 +36961,13 @@ Tips:
           isError: true
         };
       }
-    }
+    })
   );
   server2.tool(
     "get_alert_state",
     "Get the current state of all Seq alerts. Returns firing, ok, or suppressed status for each configured alert.",
     {},
-    async () => {
+    withAccessLog(logger2, "get_alert_state", async () => {
       try {
         const alertState = await makeSeqRequest("/api/alertstate");
         const safeAlertState = await redactDeep(alertState);
@@ -36902,7 +36987,7 @@ Tips:
           isError: true
         };
       }
-    }
+    })
   );
   server2.tool(
     "sql_query",
@@ -36927,7 +37012,7 @@ Tips:
 - Call get_signals first to scope the query to a service/category via the 'signal' parameter
 - Add a 'limit' clause to large rowsets, or group at a coarser level, if results are truncated`,
     dataSchema.shape,
-    async ({ query, signal, fromDateUtc, toDateUtc, range }) => {
+    withAccessLog(logger2, "sql_query", async ({ query, signal, fromDateUtc, toDateUtc, range }) => {
       try {
         const { rangeStartUtc, rangeEndUtc } = resolveDataRange(
           { range, fromDateUtc, toDateUtc },
@@ -36958,7 +37043,7 @@ Tips:
           isError: true
         };
       }
-    }
+    })
   );
   return server2;
 }
@@ -36967,7 +37052,8 @@ Tips:
 if (!SEQ_API_KEY) {
   console.error("Warning: SEQ_API_KEY is not set. Some Seq instances require authentication.");
 }
-var server = createSeqServer();
+var logger = loggerFromEnv();
+var server = createSeqServer(logger);
 async function runServer() {
   const transport = new StdioServerTransport();
   await server.connect(transport);

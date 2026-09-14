@@ -53,6 +53,9 @@ The server requires the following environment variables:
 - `SEQ_REDACTION_ENABLED` (optional): Set to `false` to disable PII redaction (defaults to enabled)
 - `SEQ_REQUEST_TIMEOUT_MS` (optional): Per-request timeout for Seq API calls, in
   milliseconds (defaults to `30000`). See [Query cost and timeouts](#query-cost-and-timeouts).
+- `SEQ_LOG_LEVEL` (optional): `debug`/`info`/`warn`/`error`/`silent` (defaults to
+  `info`). Controls the stderr access log of every tool call (who/what/status/
+  duration — never arguments or results). See [Access logging](#access-logging-who-called-what).
 
 ## Privacy / PII Redaction
 
@@ -111,6 +114,48 @@ and timestamps are preserved to keep logs useful for debugging.
 
 Set `SEQ_REDACTION_ENABLED=false` to turn redaction off (e.g. for local
 debugging against a Seq instance with no real personal data).
+
+## Access logging (who called what)
+
+Every MCP tool call (`get_signals`, `get_events`, `get_alert_state`,
+`sql_query`, and the `signals` resource) is logged to stderr as a single
+structured line, independent of and in addition to the redaction step above —
+this is an **access log**, not a debug trace, so it never contains the tool's
+arguments or its result:
+
+```
+2026-01-15T10:22:31.512Z INFO tool call {"tool":"sql_query","caller":"9f2c...ab31.18a...","status":"ok","ms":412}
+```
+
+Each line records:
+
+- **when** — timestamp (added by the logger)
+- **who** — `caller`, a stable per-user identifier (see below)
+- **what** — `tool`, the MCP tool/resource name
+- **result** — `status`, `"ok"` or `"error"` (a thrown exception or a tool
+  result with `isError: true` both count as `"error"`)
+- **how long** — `ms`, the call duration
+
+**Never logged:** the tool's input arguments (e.g. the Seq query text, event
+filters, time ranges) or any part of its result (event/log content). Keeping
+query text and log content out of the access log mirrors the redaction
+discipline above — the whole point of that redaction is to keep personal data
+inside Seq's own log content from leaving the process unmasked, so the access
+log must not become a side channel that reintroduces it.
+
+**Caller identity (`caller`):** on the remote (HTTP) server, an interactive
+user is identified by their Entra `homeAccountId` — a stable, per-user
+pseudonymous identifier the OAuth layer already keeps for audit — never their
+email/UPN or the raw token (see [Authentication](#authentication)). A
+machine-to-machine caller is logged with the `service:<client-id>` marker it
+already carries (see [Machine-to-machine auth](#machine-to-machine-auth-headless-callers)).
+The stdio entry point has no per-request auth (a single local operator behind
+the shared `SEQ_API_KEY`), so its calls are logged with the fixed caller
+`"stdio"`.
+
+Controlled by the same `SEQ_LOG_LEVEL` used for the HTTP access log (`debug`/
+`info`/`warn`/`error`/`silent`, default `info`); set it to `silent` to disable
+all logging, including this one.
 
 ## seq-ops Skill
 
