@@ -21538,6 +21538,7 @@ var EMPTY_COMPLETION_RESULT = {
 };
 
 // src/access-log.ts
+import { createHash } from "node:crypto";
 function callerId(authInfo) {
   const extra = authInfo?.extra;
   const homeAccountId = extra && typeof extra === "object" ? extra.homeAccountId : void 0;
@@ -21546,15 +21547,32 @@ function callerId(authInfo) {
   }
   return authInfo ? "unknown" : "stdio";
 }
+function triggeredByUser(args) {
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    return void 0;
+  }
+  const value = args.triggered_by_user;
+  if (typeof value !== "string" || !value.trim()) {
+    return void 0;
+  }
+  return createHash("sha256").update(value.trim()).digest("hex").slice(0, 16);
+}
 function withAccessLog(logger2, name, handler) {
   const wrapped = async (...args) => {
     const extra = args[args.length - 1];
     const caller = callerId(extra?.authInfo);
+    const humanCaller = triggeredByUser(args[0]);
     const startedAt = Date.now();
     try {
       const result = await handler(...args);
       const isError = Boolean(result && typeof result === "object" && result.isError);
-      const fields = { tool: name, caller, status: isError ? "error" : "ok", ms: Date.now() - startedAt };
+      const fields = {
+        tool: name,
+        caller,
+        ...humanCaller ? { triggeredByUser: humanCaller } : {},
+        status: isError ? "error" : "ok",
+        ms: Date.now() - startedAt
+      };
       if (isError) {
         logger2.error("tool call", fields);
       } else {
@@ -21563,7 +21581,14 @@ function withAccessLog(logger2, name, handler) {
       return result;
     } catch (err) {
       const errorName = err instanceof Error ? err.name : "UnknownError";
-      logger2.error("tool call", { tool: name, caller, ms: Date.now() - startedAt, errorName, status: "error" });
+      logger2.error("tool call", {
+        tool: name,
+        caller,
+        ...humanCaller ? { triggeredByUser: humanCaller } : {},
+        ms: Date.now() - startedAt,
+        errorName,
+        status: "error"
+      });
       throw err;
     }
   };
@@ -36811,12 +36836,15 @@ async function makeSeqRequest(endpoint, params = {}) {
   return response.json();
 }
 var timeRangeSchema = external_exports.enum(["1m", "15m", "30m", "1h", "2h", "6h", "12h", "1d", "7d", "14d", "30d"]);
+var triggeredByUserSchema = external_exports.string().trim().min(1).max(256).describe("Caller-supplied audit label for this call; not independently verified; required on every tool call and never sent to Seq");
 var signalsSchema = external_exports.object({
+  triggered_by_user: triggeredByUserSchema,
   ownerId: external_exports.string().optional().describe("Filter signals by owner ID"),
   shared: external_exports.boolean().optional().describe("Filter by shared status. Defaults to true (shared signals only)"),
   partial: external_exports.boolean().optional().describe("Include partial signal matches")
 }).strict();
 var eventsSchema = external_exports.object({
+  triggered_by_user: triggeredByUserSchema,
   signal: external_exports.string().optional().describe("Comma-separated signal IDs to scope results (get IDs from seq_get_signals)"),
   filter: external_exports.string().optional().describe(`Seq filter expression, e.g. "@Level = 'Error'" or "StatusCode >= 500"`),
   count: external_exports.number().min(1).max(MAX_EVENTS).optional().default(20).describe(`Number of events to return (1\u2013${MAX_EVENTS}, default 20)`),
@@ -36827,6 +36855,7 @@ var eventsSchema = external_exports.object({
   render: external_exports.boolean().optional().default(false).describe("Render message templates into human-readable strings (adds RenderedMessage to each event)")
 }).strict();
 var dataSchema = external_exports.object({
+  triggered_by_user: triggeredByUserSchema,
   query: external_exports.string().min(1).describe(
     `Seq SQL query. Use 'from stream' for tabular/aggregate queries, e.g. "select count(*) as n from stream group by @Level" or "select count(*) as n from stream where StatusCode >= 500 group by RequestPath order by n desc limit 20". Three syntax rules Seq enforces (each rejects the query with 400 otherwise): LABEL an aggregate with 'as' to sort on it ('order by count(*)' is rejected \u2014 use 'count(*) as n ... order by n'); do NOT select the grouping column ('group by Environment' already emits it, and selecting it too returns it twice); and distinct takes parentheses ('count(distinct(UserId))', not 'count(distinct UserId)'). Aggregates: count, sum, mean, min, max, percentile, distinct; time slicing via group by time(<n><unit>). Add a 'limit' clause to bound large rowsets.`
   ),
@@ -36962,7 +36991,7 @@ Tips:
   server2.tool(
     "get_alert_state",
     "Get the current state of all Seq alerts. Returns firing, ok, or suppressed status for each configured alert.",
-    {},
+    { triggered_by_user: triggeredByUserSchema },
     withAccessLog(logger2, "get_alert_state", async () => {
       try {
         const alertState = await makeSeqRequest("/api/alertstate");
