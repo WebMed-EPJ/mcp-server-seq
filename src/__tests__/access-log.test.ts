@@ -1,4 +1,5 @@
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
+import { createHash } from "node:crypto";
 import { callerId, withAccessLog } from "../access-log.js";
 import { createLogger } from "../logger.js";
 
@@ -76,7 +77,9 @@ describe("withAccessLog", () => {
     );
 
     expect(lines[0]).toContain('"caller":"service:claude-tag"');
-    expect(lines[0]).toContain('"triggeredByUser":"jane.doe"');
+    const expectedId = createHash("sha256").update("jane.doe").digest("hex").slice(0, 16);
+    expect(lines[0]).toContain(`"triggeredByUser":"${expectedId}"`);
+    expect(lines[0]).not.toContain("jane.doe");
   });
 
   it("logs status ok/error based on the tool's own isError result (no throw)", async () => {
@@ -140,6 +143,26 @@ describe("withAccessLog", () => {
     expect(lines[0]).toContain('"status":"error"');
     expect(lines[0]).not.toContain('"status":502');
     expect(lines[0]).not.toContain("upstream said no");
+  });
+
+  it("retains the hashed human caller label when the handler throws", async () => {
+    const lines: string[] = [];
+    const logger = createLogger({ sink: (l) => lines.push(l), now: () => "T" });
+    const handler = async (_args: { triggered_by_user: string }, _extra: { authInfo?: AuthInfo }) => {
+      throw new Error("failed");
+    };
+
+    const wrapped = withAccessLog(logger, "sql_query", handler);
+    await expect(
+      wrapped(
+        { triggered_by_user: "jane.doe" },
+        { authInfo: authInfo({ homeAccountId: "service:claude-tag" }) },
+      ),
+    ).rejects.toThrow("failed");
+
+    const expectedId = createHash("sha256").update("jane.doe").digest("hex").slice(0, 16);
+    expect(lines[0]).toContain('"caller":"service:claude-tag"');
+    expect(lines[0]).toContain(`"triggeredByUser":"${expectedId}"`);
   });
 
   it('reports the caller as "stdio" when the handler is invoked with no authInfo (stdio entry point)', async () => {

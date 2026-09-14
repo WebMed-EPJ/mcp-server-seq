@@ -21538,6 +21538,7 @@ var EMPTY_COMPLETION_RESULT = {
 };
 
 // src/access-log.ts
+import { createHash } from "node:crypto";
 function callerId(authInfo) {
   const extra = authInfo?.extra;
   const homeAccountId = extra && typeof extra === "object" ? extra.homeAccountId : void 0;
@@ -21551,7 +21552,10 @@ function triggeredByUser(args) {
     return void 0;
   }
   const value = args.triggered_by_user;
-  return typeof value === "string" && value.trim() ? value.trim().slice(0, 256) : void 0;
+  if (typeof value !== "string" || !value.trim()) {
+    return void 0;
+  }
+  return createHash("sha256").update(value.trim()).digest("hex").slice(0, 16);
 }
 function withAccessLog(logger2, name, handler) {
   const wrapped = async (...args) => {
@@ -36832,7 +36836,7 @@ async function makeSeqRequest(endpoint, params = {}) {
   return response.json();
 }
 var timeRangeSchema = external_exports.enum(["1m", "15m", "30m", "1h", "2h", "6h", "12h", "1d", "7d", "14d", "30d"]);
-var triggeredByUserSchema = external_exports.string().trim().min(1).max(256).describe("Human user who triggered this call; required for shared service-account clients");
+var triggeredByUserSchema = external_exports.string().trim().min(1).max(256).describe("Human user audit label for this call; required on every tool call and never sent to Seq");
 var signalsSchema = external_exports.object({
   triggered_by_user: triggeredByUserSchema,
   ownerId: external_exports.string().optional().describe("Filter signals by owner ID"),

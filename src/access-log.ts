@@ -32,9 +32,11 @@
  *
  * `triggeredByUser` is a caller-supplied identity for shared service-account
  * clients (for example Claude Tag). It is logged separately from the
- * authenticated `caller` and must not be treated as proof of identity.
+ * authenticated `caller`, as a short deterministic hash, and must not be
+ * treated as proof of identity.
  */
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
+import { createHash } from "node:crypto";
 import type { Logger } from "./logger.js";
 
 /** Resolve a PII-safe caller identity from a tool call's AuthInfo (if any). */
@@ -56,7 +58,10 @@ function triggeredByUser(args: unknown): string | undefined {
     return undefined;
   }
   const value = (args as Record<string, unknown>).triggered_by_user;
-  return typeof value === "string" && value.trim() ? value.trim().slice(0, 256) : undefined;
+  if (typeof value !== "string" || !value.trim()) {
+    return undefined;
+  }
+  return createHash("sha256").update(value.trim()).digest("hex").slice(0, 16);
 }
 
 /**
