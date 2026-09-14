@@ -53,6 +53,7 @@ export function callerId(authInfo: AuthInfo | undefined): string {
 // `any` is required here to accept every tool/resource callback shape.
 type AnyHandler = (...args: any[]) => any;
 
+/** Hash the bounded caller-supplied audit label before it reaches the logger. */
 function triggeredByUser(args: unknown): string | undefined {
   if (!args || typeof args !== "object" || Array.isArray(args)) {
     return undefined;

@@ -36836,7 +36836,7 @@ async function makeSeqRequest(endpoint, params = {}) {
   return response.json();
 }
 var timeRangeSchema = external_exports.enum(["1m", "15m", "30m", "1h", "2h", "6h", "12h", "1d", "7d", "14d", "30d"]);
-var triggeredByUserSchema = external_exports.string().trim().min(1).max(256).describe("Human user audit label for this call; required on every tool call and never sent to Seq");
+var triggeredByUserSchema = external_exports.string().trim().min(1).max(256).describe("Caller-supplied audit label for this call; not independently verified; required on every tool call and never sent to Seq");
 var signalsSchema = external_exports.object({
   triggered_by_user: triggeredByUserSchema,
   ownerId: external_exports.string().optional().describe("Filter signals by owner ID"),

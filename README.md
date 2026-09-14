@@ -148,9 +148,11 @@ and log content out of the access log mirrors the redaction discipline above
 log content from leaving the process unmasked, so the access log must not
 become a side channel that reintroduces it.
 
-All Seq tools require a non-empty `triggered_by_user` value. This is a
-caller-supplied audit label, hashed before logging, not an authenticated
+All Seq tools require a non-empty `triggered_by_user` value. The server trims
+the caller-supplied audit label and requires the resulting value to be
+1–256 characters, then hashes it before logging. It is not an authenticated
 identity claim; the authenticated Entra/service identity remains in `caller`.
+Clients using an unpinned server revision must add this field when upgrading.
 
 **Caller identity (`caller`):** on the remote (HTTP) server, an interactive
 user is identified by their Entra `homeAccountId` — a stable, per-user

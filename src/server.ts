@@ -131,7 +131,7 @@ async function makeSeqRequest<T>(endpoint: string, params: Record<string, string
 // Schema for time range validation
 const timeRangeSchema = z.enum(['1m', '15m', '30m', '1h', '2h', '6h', '12h', '1d', '7d', '14d', '30d']);
 const triggeredByUserSchema = z.string().trim().min(1).max(256)
-  .describe('Human user audit label for this call; required on every tool call and never sent to Seq');
+  .describe('Caller-supplied audit label for this call; not independently verified; required on every tool call and never sent to Seq');
 
 const signalsSchema = z.object({
   triggered_by_user: triggeredByUserSchema,
