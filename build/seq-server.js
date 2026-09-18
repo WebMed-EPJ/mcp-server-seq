@@ -28203,7 +28203,7 @@ var GUID_COMPACT = /(?<![0-9a-z])[0-9a-f]{32}(?![0-9a-z])/gi;
 function createGuidAliases() {
   return /* @__PURE__ */ new Map();
 }
-function stripGuids(text, aliases) {
+function stripGuids(text, aliases, opts) {
   if (!text) {
     return text;
   }
@@ -28218,7 +28218,8 @@ function stripGuids(text, aliases) {
     seen.set(key, marker);
     return marker;
   };
-  return text.replace(GUID_HYPHENATED, replace).replace(GUID_COMPACT, replace);
+  const hyphenated = text.replace(GUID_HYPHENATED, replace);
+  return opts?.compact === false ? hyphenated : hyphenated.replace(GUID_COMPACT, replace);
 }
 
 // src/redact.ts

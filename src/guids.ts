@@ -74,6 +74,11 @@ const GUID_HYPHENATED = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
  * the paging cursor. The two connectors here are unaffected: their handles are
  * hyphenated GUIDs kept by field, and SharePoint's ContentTypeId is a longer hex
  * run than the guard allows. See guids.test.ts for the pinned shapes.
+ *
+ * Where that cost is not payable at all — a caller in front of TRACING data,
+ * where 32 bare hex digits ARE the primary key and appear inside log lines that
+ * no key-based exemption can reach — this form is turned off entirely; see
+ * StripOptions.
  */
 const GUID_COMPACT = /(?<![0-9a-z])[0-9a-f]{32}(?![0-9a-z])/gi;
 
@@ -98,12 +103,31 @@ export function createGuidAliases(): GuidAliases {
 }
 
 /**
+ * `compact: false` masks ONLY the hyphenated form.
+ *
+ * For a caller in front of TRACING data this is not a weakening but the
+ * difference between a working tool and a broken one: a W3C trace id is 32 bare
+ * hex digits, it is the primary key of the whole system, and it appears both as
+ * a field and inside log lines, where no key-based exemption can reach it. The
+ * evidence for the trade is that WebMed patient ids arrive HYPHENATED — .NET's
+ * default `Guid.ToString()`, confirmed against the live test instance — and the
+ * hyphenated pattern still removes those, in a field and in prose alike.
+ *
+ * Leave it on (the default) for document, mail and record data, where a bare
+ * 32-hex run is not load-bearing and a re-encoded identifier is the likelier
+ * reading of one.
+ */
+export interface StripOptions {
+  compact?: boolean;
+}
+
+/**
  * Replace every GUID in `text` with a `[GUID_n]` marker. Pure, total (it cannot
  * throw, so there is no fail-closed case to handle), and a no-op on text that
  * holds none — which is the overwhelmingly common case, so the scan is cheap
  * enough to run on every field of every response.
  */
-export function stripGuids(text: string, aliases?: GuidAliases): string {
+export function stripGuids(text: string, aliases?: GuidAliases, opts?: StripOptions): string {
   if (!text) {
     return text;
   }
@@ -118,7 +142,8 @@ export function stripGuids(text: string, aliases?: GuidAliases): string {
     seen.set(key, marker);
     return marker;
   };
-  return text.replace(GUID_HYPHENATED, replace).replace(GUID_COMPACT, replace);
+  const hyphenated = text.replace(GUID_HYPHENATED, replace);
+  return opts?.compact === false ? hyphenated : hyphenated.replace(GUID_COMPACT, replace);
 }
 
 /** Does this text carry a GUID? Used for counting/reporting, never for gating. */
