@@ -36,6 +36,7 @@ import {
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 
 import { loadRemoteConfig } from "./remote-config.js";
+import { assertRedactionConfig } from "./redact.js";
 import { accessLogMiddleware, errorFields, loggerFromEnv } from "./logger.js";
 import { createSeqServer, SEQ_API_KEY, SEQ_BASE_URL } from "./server.js";
 import { EntraOAuthProvider } from "./remote/provider.js";
@@ -45,6 +46,12 @@ const logger = loggerFromEnv();
 
 async function main(): Promise<void> {
   const config = loadRemoteConfig();
+
+  // Fail closed BEFORE anything is served: SEQ_REDACTION_ENABLED=false is only
+  // honoured against a Seq instance known to hold no personal data. Crashing is
+  // the point — a deployment whose config says redaction is off while the code
+  // has quietly forced it back on is a deployment nobody can reason about.
+  assertRedactionConfig();
 
   // The upstream Seq target lives in server.ts (shared with the stdio entry).
   // The remote server is useless without an API key — most Seq instances reject

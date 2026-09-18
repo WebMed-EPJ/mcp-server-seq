@@ -50,7 +50,11 @@ The server requires the following environment variables:
 
 - `SEQ_BASE_URL` (optional): Your Seq server URL (defaults to 'http://localhost:8080')
 - `SEQ_API_KEY` (required): Your Seq API key
-- `SEQ_REDACTION_ENABLED` (optional): Set to `false` to disable PII redaction (defaults to enabled)
+- `SEQ_REDACTION_ENABLED` (optional): Set to `false` to disable PII redaction (defaults to enabled).
+  Honoured **only** against a Seq instance known to hold no personal data — see
+  [Turning redaction off](#turning-redaction-off-test-instances-only)
+- `SEQ_NON_PRODUCTION_HOSTS` (optional): Comma-separated extra hosts where the opt-out above is
+  honoured (e.g. a local Seq). Additive only; it can never unlock the production host
 - `SEQ_REQUEST_TIMEOUT_MS` (optional): Per-request timeout for Seq API calls, in
   milliseconds (defaults to `30000`). See [Query cost and timeouts](#query-cost-and-timeouts).
 - `SEQ_LOG_LEVEL` (optional): `debug`/`info`/`warn`/`error`/`silent` (defaults to
@@ -112,8 +116,46 @@ and timestamps are preserved to keep logs useful for debugging.
 > stronger assurances are required, consider replacing the library with a fully
 > in-house deterministic matcher.
 
-Set `SEQ_REDACTION_ENABLED=false` to turn redaction off (e.g. for local
-debugging against a Seq instance with no real personal data).
+### Patient identifiers (GUIDs)
+
+WebMed EPJ identifies a patient by a **GUID**, and they reach the logs: the test
+instance shows them arriving as a `PatientId` property (all hyphenated), and they
+also appear inside rendered messages. Neither the fødselsnummer pattern nor the
+name dictionary catches that, so every string returned from Seq additionally goes
+through a pure, unfailable GUID pass (`src/guids.ts`, the byte-identical copy of
+the one in `WebMed-EPJ/claude-plugins`). Each GUID becomes `[GUID_1]`,
+`[GUID_2]`, … numbered **per event**, so a property and the message quoting it
+agree while two events referencing the same patient stay unlinkable.
+
+Machine identifiers are exempt by field (`GUID_EXEMPT_KEYS`): `TraceId`,
+`SpanId`, `ParentId`, `ParentSpanId`, `Id` and `Links`. A W3C trace id and Seq's
+own `event-<32 hex>` id are bare 32-hex runs that no pattern can tell from an
+identifier, and masking them would cost request correlation across services and
+the paging cursor while protecting nobody. The exemption also understands Seq's
+`{ Name, Value }` property shape, so a property *named* `TraceId` keeps its value
+too. Everything else — `PatientId` included — is masked.
+
+### Turning redaction off (test instances only)
+
+`SEQ_REDACTION_ENABLED=false` turns off the whole redaction step, GUID pass
+included. WebMed's test environment holds no real personal data, so this is a
+legitimate debugging aid there — and the same variable must never be able to do
+the same thing in production, which is a journal system.
+
+So the opt-out is honoured only when `SEQ_BASE_URL` points at a host known to
+hold no personal data (`seq.k8s.webmedepj.no`, `localhost`, `127.0.0.1`, `[::1]`,
+plus anything added via `SEQ_NON_PRODUCTION_HOSTS`). It is an **allow-list**: an
+unknown host, an unparseable URL or an unset `SEQ_BASE_URL` all read as
+production, because guessing wrong the other way puts patient data in front of a
+model. `seq.intern.webmed.no` is hard-coded as production and cannot be unlocked
+by `SEQ_NON_PRODUCTION_HOSTS` — that variable is additive only.
+
+The guard has two halves, and both are needed. `assertRedactionConfig()` runs at
+startup in **both** entry points and **refuses to start** when the opt-out is set
+against a production or unidentified instance: a pod that will not start is
+visible to whoever deployed it, whereas a silent override is visible only to
+whoever reads the logs. And `isRedactionEnabled()` itself fails closed, so even a
+code path that forgets the startup check keeps redacting.
 
 ## Access logging (who called what)
 

@@ -2,6 +2,7 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import 'dotenv/config';
 import { loggerFromEnv } from "./logger.js";
+import { assertRedactionConfig } from "./redact.js";
 import { createSeqServer, SEQ_API_KEY } from "./server.js";
 
 // The stdio entry point. This is the file the WebMed `seq-ops` marketplace
@@ -11,6 +12,17 @@ import { createSeqServer, SEQ_API_KEY } from "./server.js";
 
 if (!SEQ_API_KEY) {
   console.error('Warning: SEQ_API_KEY is not set. Some Seq instances require authentication.');
+}
+
+// Refuse to start when redaction was switched off against an instance that is
+// not known to be free of personal data (see assertRedactionConfig). stdio is
+// where a developer is most likely to try the opt-out, so it is where the check
+// most needs to be loud rather than silently overridden.
+try {
+  assertRedactionConfig();
+} catch (error) {
+  console.error((error as Error).message);
+  process.exit(1);
 }
 
 // Stdio has no per-request auth — a single local operator behind SEQ_API_KEY

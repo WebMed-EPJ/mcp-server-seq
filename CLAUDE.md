@@ -119,7 +119,26 @@ from `src/`. `esbuild` is pinned to an exact version so the bundle is byte-repro
 - All log data returned from Seq passes through `redactDeep` (`src/redact.ts`) before
   leaving the server, masking Norwegian personal data: fødselsnummer (incl. D/H/FH-numbers),
   person names (curated dictionary), phone numbers, and emails.
-- Enabled by default; set `SEQ_REDACTION_ENABLED=false` to disable (e.g. local debugging
-  against an instance with no real personal data).
+- **GUIDs are masked too** (`src/guids.ts`, byte-identical to the copy in
+  `WebMed-EPJ/claude-plugins` — keep them diffable): a WebMed patient is identified by a GUID and
+  the logs carry them, in a `PatientId` property and inside rendered messages. Pure, unfailable
+  string pass, applied before the detector. Markers are `[GUID_n]`, numbered **per event** (an array
+  handed to `redactDeep` is a page of items, each with its own alias map) so two events referencing
+  one patient are not linkable, while a property and the message quoting it agree.
+- `GUID_EXEMPT_KEYS` (`TraceId`, `SpanId`, `ParentId`, `ParentSpanId`, `Id`, `Links`) keep their
+  values: a W3C trace id and Seq's own `event-<32 hex>` id are bare 32-hex runs no pattern can tell
+  from an identifier, and masking them costs request correlation and the paging cursor while
+  protecting nobody. The exemption is inherited by the subtree (so `Links.Self` is covered) and
+  understands Seq's `{ Name, Value }` property shape, where the key that decides is the sibling
+  `Name`. Exempt fields still get the ordinary PII pass — only the GUID step is skipped. Keep the
+  list short: each entry is a field where a GUID survives.
+- Enabled by default; `SEQ_REDACTION_ENABLED=false` disables the whole step (GUID pass included) but
+  is honoured **only** against a Seq instance known to hold no personal data. `redactionOptOutAllowed`
+  is an ALLOW-list of hosts (test, localhost, plus `SEQ_NON_PRODUCTION_HOSTS`, which is additive and
+  can never unlock the hard-coded `seq.intern.webmed.no`); an unknown host, an unparseable URL or an
+  unset `SEQ_BASE_URL` all read as production. Two halves on purpose: `assertRedactionConfig()` runs
+  in BOTH entry points and refuses to start (a dead pod is visible to whoever deployed it; a silent
+  override is not), and `isRedactionEnabled()` fails closed anyway, so a path that forgets the check
+  still redacts.
 - Redaction runs entirely in-process — no log content is sent anywhere.
 - See `README.md` for covered data types and known limitations.

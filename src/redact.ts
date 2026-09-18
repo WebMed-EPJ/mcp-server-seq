@@ -1,5 +1,7 @@
 import { OpenRedaction, type PIIPattern } from 'openredaction';
 
+import { createGuidAliases, type GuidAliases, stripGuids } from './guids.js';
+
 /**
  * Local, privacy-preserving redaction of personal data in log payloads
  * returned from Seq.
@@ -22,17 +24,109 @@ import { OpenRedaction, type PIIPattern } from 'openredaction';
  *    only masked when part of a multi-token name (see redactNorwegianNames)
  *  - Email addresses (library built-in; reserved example/test domains such
  *    as example.com are intentionally treated as non-PII)
+ *  - GUIDs (src/guids.ts) — a WebMed EPJ patient is identified by one, and log
+ *    lines carry them in properties and rendered messages alike. Unlike the
+ *    patterns above this is a pure, unfailable string pass, and it is applied to
+ *    every string EXCEPT the machine identifiers named in GUID_EXEMPT_KEYS
+ *    (see redactDeep): masking a TraceId would cost request correlation without
+ *    protecting anyone.
  */
 
 /**
+ * Seq hosts where redaction may NEVER be switched off, whatever the environment
+ * says. Hard-coded on purpose: the opt-out below is an env var, and an env var
+ * is exactly what gets copied from one overlay into another. This list is the
+ * one thing a copied `SEQ_REDACTION_ENABLED=false` cannot take with it.
+ */
+const PRODUCTION_SEQ_HOSTS = ['seq.intern.webmed.no'];
+
+/**
+ * Seq hosts known to hold no real personal data, where the opt-out is honoured.
+ * An ALLOW-list rather than a deny-list: an unknown host — a new instance, a
+ * typo, an unset SEQ_BASE_URL — must read as production, because the failure
+ * mode of guessing wrong is patient data reaching a model unredacted. Extendable
+ * for a local instance via SEQ_NON_PRODUCTION_HOSTS (comma-separated), which can
+ * only ADD hosts and never overrides PRODUCTION_SEQ_HOSTS.
+ */
+const NON_PRODUCTION_SEQ_HOSTS = ['seq.k8s.webmedepj.no', 'localhost', '127.0.0.1', '[::1]'];
+
+/** The host of the configured upstream Seq, or null when it cannot be read. */
+function seqHost(): string | null {
+  const raw = process.env.SEQ_BASE_URL?.trim();
+  if (!raw) return null;
+  try {
+    return new URL(raw).host.toLowerCase();
+  } catch {
+    // An unparseable URL is not a host we can clear — treat it as unknown.
+    return null;
+  }
+}
+
+/**
+ * May the redaction opt-out be honoured against the configured Seq instance?
+ *
+ * Test carries no real personal data, so turning redaction off there is a
+ * legitimate debugging aid. Production is a journal system, and the point of
+ * this check is that the same env var cannot do the same thing there.
+ *
+ * @returns the verdict plus the host it was made about, for the startup error
+ */
+export function redactionOptOutAllowed(): { allowed: boolean; host: string | null } {
+  const host = seqHost();
+  if (host === null || PRODUCTION_SEQ_HOSTS.includes(host)) {
+    return { allowed: false, host };
+  }
+  const extra = (process.env.SEQ_NON_PRODUCTION_HOSTS ?? '')
+    .split(',')
+    .map((h) => h.trim().toLowerCase())
+    .filter((h) => h !== '' && !PRODUCTION_SEQ_HOSTS.includes(h));
+  return { allowed: [...NON_PRODUCTION_SEQ_HOSTS, ...extra].includes(host), host };
+}
+
+/** True when the operator asked for redaction to be off, whatever we answer. */
+function redactionOptOutRequested(): boolean {
+  return (process.env.SEQ_REDACTION_ENABLED ?? 'true').toLowerCase() === 'false';
+}
+
+/**
  * Whether redaction is active. Enabled by default; set
- * `SEQ_REDACTION_ENABLED=false` to opt out (e.g. for debugging against a
- * non-production Seq instance with no real personal data).
+ * `SEQ_REDACTION_ENABLED=false` to opt out — honoured ONLY against a Seq
+ * instance known to hold no real personal data (see redactionOptOutAllowed).
+ *
+ * This is the FAIL-CLOSED half of the guard: against production, or an instance
+ * we cannot identify, it keeps redacting and says nothing. assertRedactionConfig
+ * is the loud half, and both exist because either alone is wrong — a silent
+ * override leaves an operator believing a setting that is not in effect, and a
+ * startup check alone would be bypassed by any code path that forgets to call it.
  *
  * @returns true when log payloads should be redacted before returning them
  */
 function isRedactionEnabled(): boolean {
-  return (process.env.SEQ_REDACTION_ENABLED ?? 'true').toLowerCase() !== 'false';
+  return !redactionOptOutRequested() || !redactionOptOutAllowed().allowed;
+}
+
+/**
+ * Refuse to start when redaction was switched off against an instance that is
+ * not known to be free of personal data. Called by both entry points.
+ *
+ * Crashing is deliberate. The alternative — starting with redaction silently
+ * forced back on — leaves a deployment whose configuration says one thing and
+ * whose behaviour says another, and the mistake is only visible to whoever
+ * reads the logs. A pod that will not start is visible to whoever deployed it.
+ *
+ * @throws Error naming the variable, the host and the two ways out
+ */
+export function assertRedactionConfig(): void {
+  if (!redactionOptOutRequested()) return;
+  const { allowed, host } = redactionOptOutAllowed();
+  if (allowed) return;
+  const where = host === null ? 'SEQ_BASE_URL is unset or unparseable' : `SEQ_BASE_URL points at ${host}`;
+  throw new Error(
+    `SEQ_REDACTION_ENABLED=false is refused: ${where}, which is not a Seq instance known to hold ` +
+      `no personal data. Redaction can only be switched off against a non-production instance ` +
+      `(${NON_PRODUCTION_SEQ_HOSTS.join(', ')}, or a host added to SEQ_NON_PRODUCTION_HOSTS). ` +
+      `Remove SEQ_REDACTION_ENABLED from this deployment, or point it at the test instance.`,
+  );
 }
 
 /**
@@ -336,10 +430,20 @@ const SEGMENT_DELIMITERS = /([;|\r\n\t]+)/;
  * @param text - The text to scan and redact
  * @returns The redacted text (unchanged if redaction is disabled or empty)
  */
-export async function redactText(text: string): Promise<string> {
+export async function redactText(
+  text: string,
+  opts?: { aliases?: GuidAliases; maskGuids?: boolean },
+): Promise<string> {
   if (!isRedactionEnabled() || !text) return text;
 
-  const parts = text.split(SEGMENT_DELIMITERS);
+  // GUIDs go first, and by a pure string pass rather than the detector: a
+  // patient identifier must not depend on the library's confidence model, which
+  // is the very thing the segmentation below works around. Skipped only for the
+  // machine identifiers redactDeep exempts (TraceId and friends), which still
+  // get the ordinary PII pass.
+  const guarded = opts?.maskGuids === false ? text : stripGuids(text, opts?.aliases);
+
+  const parts = guarded.split(SEGMENT_DELIMITERS);
   const detector = getDetector();
   // Segments are processed sequentially (not via Promise.all) because the
   // detector is a shared singleton: concurrent in-flight detect() calls could
@@ -363,6 +467,44 @@ export async function redactText(text: string): Promise<string> {
 }
 
 /**
+ * Fields whose value is a MACHINE identifier that happens to look like a GUID or
+ * a 32-hex run, and which therefore keeps its value.
+ *
+ * Measured against the WebMed test instance: a W3C `TraceId` and Seq's own
+ * `event-<32 hex>` `Id` are both bare 32-hex runs, and the `Links` a Seq event
+ * carries embed that same id. Masking them costs request correlation across
+ * services and the paging cursor, and protects nobody — nothing about a patient
+ * is recoverable from a trace id. A patient identifier arrives as `PatientId`
+ * (or inside a message), never as one of these.
+ *
+ * Matched case-insensitively, and inherited by the whole subtree (so `Links`
+ * covers `Links.Self`). Keep this list SHORT: every entry is a field where a
+ * GUID survives, so the argument for adding one has to be that the connector or
+ * its caller cannot work without it.
+ */
+const GUID_EXEMPT_KEYS = new Set(['traceid', 'spanid', 'parentid', 'parentspanid', 'id', 'links']);
+
+/** Is this the name of a field holding a machine identifier? (case-insensitive) */
+function isGuidExemptKey(key: string): boolean {
+  return GUID_EXEMPT_KEYS.has(key.toLowerCase());
+}
+
+/**
+ * The property NAME of a Seq `{ Name, Value }` pair, or null for any other
+ * object. Both members must be present and `Name` must be a string, so an
+ * ordinary object that merely has a `Value` field cannot shelter its contents.
+ */
+function seqPropertyName(node: Record<string, unknown>): string | null {
+  return typeof node.Name === 'string' && 'Value' in node ? node.Name : null;
+}
+
+/** Threaded through redactDeep: one alias map per item, plus the exempt flag. */
+interface RedactContext {
+  aliases: GuidAliases;
+  exempt?: boolean;
+}
+
+/**
  * Recursively redact personal data from any JSON-serialisable value
  * (objects, arrays, strings). Structure and non-string values are preserved;
  * 11-digit integers are also checked so a fødselsnummer stored as a number
@@ -371,25 +513,49 @@ export async function redactText(text: string): Promise<string> {
  * @param value - The value to redact
  * @returns A new value with personal data masked
  */
-export async function redactDeep<T>(value: T): Promise<T> {
+export async function redactDeep<T>(value: T, ctx?: RedactContext): Promise<T> {
   if (!isRedactionEnabled()) return value;
 
+  // Top-level entry: an array is a page of ITEMS, so each element gets its own
+  // GUID alias map. Sharing one across the page would make the same [GUID_n] in
+  // two events say they concern the same patient — the linkage the mask removes.
+  // Within one event the map IS shared, so a property and the rendered message
+  // that quotes it agree. (Same rule as the WebMed m365/Lime connectors.)
+  if (ctx === undefined) {
+    if (Array.isArray(value)) {
+      const items: unknown[] = [];
+      for (const item of value) items.push(await redactDeep(item, { aliases: createGuidAliases() }));
+      return items as unknown as T;
+    }
+    return redactDeep(value, { aliases: createGuidAliases() });
+  }
+
   if (typeof value === 'string') {
-    return (await redactText(value)) as unknown as T;
+    return (await redactText(value, { aliases: ctx.aliases, maskGuids: !ctx.exempt })) as unknown as T;
   }
 
   if (Array.isArray(value)) {
     // Sequential (not Promise.all) so redactText's detect() calls never run
     // concurrently against the shared singleton detector — see redactText.
     const arr: unknown[] = [];
-    for (const item of value) arr.push(await redactDeep(item));
+    for (const item of value) arr.push(await redactDeep(item, ctx));
     return arr as unknown as T;
   }
 
   if (value !== null && typeof value === 'object') {
     const out: Record<string, unknown> = {};
+    // Seq renders an event property as { Name, Value }, so the KEY that decides
+    // whether this is a machine identifier is the sibling `Name`, not "Value".
+    // Without this a property literally called TraceId would be masked while the
+    // top-level one is not — and, worse, the exemption would be unreachable for
+    // every property Seq returns in that shape.
+    const named = seqPropertyName(value as Record<string, unknown>);
     for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
-      out[key] = await redactDeep(val);
+      const exempt =
+        ctx.exempt ||
+        isGuidExemptKey(key) ||
+        (key === 'Value' && named !== null && isGuidExemptKey(named));
+      out[key] = await redactDeep(val, { aliases: ctx.aliases, exempt });
     }
     return out as unknown as T;
   }
@@ -402,7 +568,8 @@ export async function redactDeep<T>(value: T): Promise<T> {
     const raw = String(Math.abs(value));
     const candidate = raw.length === 11 ? raw : raw.length === 10 ? `0${raw}` : null;
     if (candidate) {
-      const redacted = await redactText(candidate);
+      // A number cannot be a GUID; only the fødselsnummer check applies.
+      const redacted = await redactText(candidate, { maskGuids: false });
       if (redacted !== candidate) return redacted as unknown as T;
     }
     return value;

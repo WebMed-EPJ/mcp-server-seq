@@ -62,6 +62,30 @@ claude mcp add --transport stdio \
 
 ---
 
+## Personal data is masked before you see it
+
+Every response from these tools passes through the server's redaction step, so
+log content reaches you with personal data already replaced by markers:
+`[FNR_1]` (fødselsnummer), `[NAME_1]`, `[PHONE_1]`, `[EMAIL_1]` and — because a
+WebMed EPJ patient is identified by one — `[GUID_1]` for every GUID in the text.
+
+Three things follow, and they matter for how you investigate:
+
+- **A marker is not corruption and not a bug.** Report the finding around it;
+  never tell the user the log looks malformed because of a marker.
+- **Never ask the user to paste the raw value back**, and never try to
+  reconstruct it from other fields. The value is gone on purpose; if the
+  investigation genuinely needs it, the user opens Seq themselves.
+- **Markers are numbered per event.** `[GUID_1]` in one event and `[GUID_1]` in
+  another are *not* the same patient — the numbering restarts. Within one event
+  they are the same value, so a property and the message quoting it can be tied
+  together, and that is the only linkage you may draw.
+
+Machine identifiers are deliberately **not** masked: `TraceId`, `SpanId`,
+`ParentId`, the event `Id` and its `Links` come through intact, so correlating a
+request across services and paging with `after` work exactly as before. Use those
+for correlation — they are what they are for.
+
 ## Query cost — how not to time out
 
 Every Seq call has a hard per-request timeout (**30 s** by default; `SEQ_REQUEST_TIMEOUT_MS` on the
