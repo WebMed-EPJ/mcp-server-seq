@@ -28199,7 +28199,7 @@ init_HealthCheck();
 // src/guids.ts
 var MARKER = (n) => `[GUID_${n}]`;
 var GUID_HYPHENATED = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
-var GUID_COMPACT = /(?<![0-9a-z])[0-9a-f]{32}(?![0-9a-z])/gi;
+var GUID_COMPACT = /(?:(?<![0-9a-z])|(?<=%[0-9a-f]{2}))[0-9a-f]{32}(?![0-9a-z])/gi;
 function createGuidAliases() {
   return /* @__PURE__ */ new Map();
 }
@@ -28209,7 +28209,7 @@ function stripGuids(text, aliases, opts) {
   }
   const seen = aliases ?? createGuidAliases();
   const replace = (match) => {
-    const key = match.toLowerCase();
+    const key = match.toLowerCase().replace(/-/g, "");
     const existing = seen.get(key);
     if (existing !== void 0) {
       return existing;
@@ -28225,11 +28225,14 @@ function stripGuids(text, aliases, opts) {
 // src/redact.ts
 var PRODUCTION_SEQ_HOSTS = ["seq.intern.webmed.no"];
 var NON_PRODUCTION_SEQ_HOSTS = ["seq.k8s.webmedepj.no", "localhost", "127.0.0.1", "[::1]"];
+function canonicalHostname(host) {
+  return host.trim().toLowerCase().replace(/\.$/, "");
+}
 function seqHost() {
   const raw = process.env.SEQ_BASE_URL?.trim();
   if (!raw) return null;
   try {
-    return new URL(raw).host.toLowerCase();
+    return canonicalHostname(new URL(raw).hostname);
   } catch {
     return null;
   }
@@ -28239,7 +28242,7 @@ function redactionOptOutAllowed() {
   if (host === null || PRODUCTION_SEQ_HOSTS.includes(host)) {
     return { allowed: false, host };
   }
-  const extra = (process.env.SEQ_NON_PRODUCTION_HOSTS ?? "").split(",").map((h) => h.trim().toLowerCase()).filter((h) => h !== "" && !PRODUCTION_SEQ_HOSTS.includes(h));
+  const extra = (process.env.SEQ_NON_PRODUCTION_HOSTS ?? "").split(",").map(canonicalHostname).filter((h) => h !== "" && !PRODUCTION_SEQ_HOSTS.includes(h));
   return { allowed: [...NON_PRODUCTION_SEQ_HOSTS, ...extra].includes(host), host };
 }
 function redactionOptOutRequested() {
@@ -28557,6 +28560,7 @@ function isGuidExemptKey(key) {
 function seqPropertyName(node) {
   return typeof node.Name === "string" && "Value" in node ? node.Name : null;
 }
+var ROWSET_KEYS = /* @__PURE__ */ new Set(["rows", "slices"]);
 async function redactDeep(value, ctx) {
   if (!isRedactionEnabled()) return value;
   if (ctx === void 0) {
@@ -28580,6 +28584,14 @@ async function redactDeep(value, ctx) {
     const named = seqPropertyName(value);
     for (const [key, val] of Object.entries(value)) {
       const exempt = ctx.exempt || isGuidExemptKey(key) || key === "Value" && named !== null && isGuidExemptKey(named);
+      if (!exempt && ROWSET_KEYS.has(key.toLowerCase()) && Array.isArray(val)) {
+        const rows = [];
+        for (const row of val) {
+          rows.push(await redactDeep(row, { aliases: createGuidAliases() }));
+        }
+        out[key] = rows;
+        continue;
+      }
       out[key] = await redactDeep(val, { aliases: ctx.aliases, exempt });
     }
     return out;

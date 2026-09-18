@@ -124,7 +124,10 @@ from `src/`. `esbuild` is pinned to an exact version so the bundle is byte-repro
   the logs carry them, in a `PatientId` property and inside rendered messages. Pure, unfailable
   string pass, applied before the detector. Markers are `[GUID_n]`, numbered **per event** (an array
   handed to `redactDeep` is a page of items, each with its own alias map) so two events referencing
-  one patient are not linkable, while a property and the message quoting it agree.
+  one patient are not linkable, while a property and the message quoting it agree. `ROWSET_KEYS`
+  (`Rows`, `Slices`) extends that to `sql_query`, whose rows all arrive inside ONE object — without
+  it a row-per-event query showed one patient as the same marker down the column. An event's
+  `Properties` array is deliberately NOT in that set: those are one event's members.
 - `GUID_EXEMPT_KEYS` (`TraceId`, `SpanId`, `ParentId`, `ParentSpanId`, `Id`, `Links`) keep their
   values: a W3C trace id and Seq's own `event-<32 hex>` id are bare 32-hex runs no pattern can tell
   from an identifier, and masking them costs request correlation and the paging cursor while
@@ -136,7 +139,12 @@ from `src/`. `esbuild` is pinned to an exact version so the bundle is byte-repro
   is honoured **only** against a Seq instance known to hold no personal data. `redactionOptOutAllowed`
   is an ALLOW-list of hosts (test, localhost, plus `SEQ_NON_PRODUCTION_HOSTS`, which is additive and
   can never unlock the hard-coded `seq.intern.webmed.no`); an unknown host, an unparseable URL or an
-  unset `SEQ_BASE_URL` all read as production. Two halves on purpose: `assertRedactionConfig()` runs
+  unset `SEQ_BASE_URL` all read as production. Comparison goes through `canonicalHostname`, and both
+  normalisations are load-bearing: the PORT is dropped (`URL.host` keeps it, so the documented
+  `http://localhost:5341` was refused on the very instance the opt-out is for) and ONE trailing dot
+  is stripped (`seq.intern.webmed.no.` is the same host to DNS but not to a string compare, so
+  otherwise it both missed the production list and could be added to the extension list to unlock
+  it). Two halves on purpose: `assertRedactionConfig()` runs
   in BOTH entry points and refuses to start (a dead pod is visible to whoever deployed it; a silent
   override is not), and `isRedactionEnabled()` fails closed anyway, so a path that forgets the check
   still redacts.

@@ -125,7 +125,11 @@ name dictionary catches that, so every string returned from Seq additionally goe
 through a pure, unfailable GUID pass (`src/guids.ts`, the byte-identical copy of
 the one in `WebMed-EPJ/claude-plugins`). Each GUID becomes `[GUID_1]`,
 `[GUID_2]`, … numbered **per event**, so a property and the message quoting it
-agree while two events referencing the same patient stay unlinkable.
+agree while two events referencing the same patient stay unlinkable. A
+`sql_query` rowset is numbered **per row** for the same reason — one object holds
+every row, so without that rule a row-per-event query would show one patient as
+the same marker down the whole column. Both spellings of a GUID (hyphenated and
+32-hex) share one marker: they are one identifier.
 
 Machine identifiers are exempt by field (`GUID_EXEMPT_KEYS`): `TraceId`,
 `SpanId`, `ParentId`, `ParentSpanId`, `Id` and `Links`. A W3C trace id and Seq's
@@ -144,7 +148,10 @@ the same thing in production, which is a journal system.
 
 So the opt-out is honoured only when `SEQ_BASE_URL` points at a host known to
 hold no personal data (`seq.k8s.webmedepj.no`, `localhost`, `127.0.0.1`, `[::1]`,
-plus anything added via `SEQ_NON_PRODUCTION_HOSTS`). It is an **allow-list**: an
+plus anything added via `SEQ_NON_PRODUCTION_HOSTS`). Hosts are compared
+canonically — the **port is ignored** (so a local Seq on `:5341` matches
+`localhost`) and a trailing dot is stripped, so `seq.intern.webmed.no.` cannot be
+used as a spelling that slips past the production entry. It is an **allow-list**: an
 unknown host, an unparseable URL or an unset `SEQ_BASE_URL` all read as
 production, because guessing wrong the other way puts patient data in front of a
 model. `seq.intern.webmed.no` is hard-coded as production and cannot be unlocked

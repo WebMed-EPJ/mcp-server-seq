@@ -87,3 +87,39 @@ describe('GUID masking in Seq payloads', () => {
     expect(stripGuids('0HNOEE1KFICN4:00001A6A')).toBe('0HNOEE1KFICN4:00001A6A');
   });
 });
+
+describe('alias scope inside a tabular query result', () => {
+  beforeEach(() => {
+    delete process.env.SEQ_REDACTION_ENABLED;
+    delete process.env.SEQ_BASE_URL;
+  });
+
+  it('numbers each ROW independently, like each event', async () => {
+    // sql_query answers with one object holding every row, so without a rowset
+    // rule the whole result would share an alias map and the same patient would
+    // read as [GUID_1] in row after row — the cross-item linkage the per-item
+    // scope exists to remove. A row-per-event query is an ordinary thing to write.
+    const rowset = {
+      Columns: ['Message', 'Count'],
+      Rows: [
+        [`Journal åpnet for ${PATIENT_GUID}`, 3],
+        [`Samme pasient ${PATIENT_GUID}`, 1],
+      ],
+    };
+    const out = await redactDeep(rowset);
+    expect(out.Rows[0][0]).toBe('Journal åpnet for [GUID_1]');
+    expect(out.Rows[1][0]).toBe('Samme pasient [GUID_1]');
+    expect(out.Rows[0][1]).toBe(3);
+  });
+
+  it('keeps an event Properties array sharing ONE map', async () => {
+    // The opposite case: these are one event's members and must agree.
+    const event = {
+      RenderedMessage: `sak ${PATIENT_GUID}`,
+      Properties: [{ Name: 'PatientId', Value: PATIENT_GUID }],
+    };
+    const out = await redactDeep(event);
+    expect(out.RenderedMessage).toBe('sak [GUID_1]');
+    expect(out.Properties[0].Value).toBe('[GUID_1]');
+  });
+});

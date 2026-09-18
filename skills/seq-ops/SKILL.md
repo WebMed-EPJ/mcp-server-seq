@@ -82,7 +82,7 @@ Three things follow, and they matter for how you investigate:
   together, and that is the only linkage you may draw.
 
 Machine identifiers are deliberately **not** masked: `TraceId`, `SpanId`,
-`ParentId`, the event `Id` and its `Links` come through intact, so correlating a
+`ParentId`, `ParentSpanId`, the event `Id` and its `Links` come through intact, so correlating a
 request across services and paging with `after` work exactly as before. Use those
 for correlation — they are what they are for.
 

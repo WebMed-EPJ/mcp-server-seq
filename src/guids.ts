@@ -11,11 +11,16 @@
  * GUID in a General-labeled document would go to the model verbatim.
  *
  * So this module is deliberately NOT part of that machinery. It is pure,
- * synchronous, dependency-free and UNCONDITIONAL: every text field this
- * connector returns is passed through stripGuids, whatever the label says and
- * whatever the read scope is. There is no verbatim path for a GUID and no env
- * flag to turn this off — an identifier we cannot interpret is one we cannot
- * clear, so it does not leave.
+ * synchronous and dependency-free, and within a connector's redaction path it is
+ * UNCONDITIONAL: every text field is passed through stripGuids, whatever the
+ * label says and whatever the read scope is. There is no verbatim path for a
+ * GUID — an identifier we cannot interpret is one we cannot clear.
+ *
+ * "Within the redaction path" is the exact claim, and it is not the same as "no
+ * switch exists anywhere". These connectors have no off switch. mcp-server-seq
+ * does — SEQ_REDACTION_ENABLED, fenced to a Seq instance known to hold no
+ * personal data and refusing to start otherwise — and when redaction is off
+ * there, this pass is off with it.
  *
  * WHAT IS NOT SCRUBBED, and why. A GUID is also how Microsoft addresses things,
  * and a connector whose handles are masked is a connector that cannot work: a
@@ -55,6 +60,13 @@ const GUID_HYPHENATED = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
  * The "N" form — 32 hex digits, no hyphens — as a URL segment, a cache key or a
  * database column renders it. Same identifier, so it has to go too.
  *
+ * The percent-encoding alternative is the same lesson the hyphenated form
+ * taught: `Journal%203f2504e04f8911d39a0c0305e82c3301` was NOT matched, because
+ * the `0` of `%20` is a hex digit and the guard blocked it. A complete
+ * percent-encoded byte therefore opens the match as well — and the digests stay
+ * safe regardless, because the TRAILING guard still refuses a 32-digit window of
+ * a longer run whichever side the match was opened from.
+ *
  * This one DOES need the hex guard, for the opposite reason: without it, any
  * 32-digit window of a longer hex run matches, so a SHA-1 (40) or SHA-256 (64)
  * digest would come back mangled — a silent corruption of something a reader
@@ -80,7 +92,7 @@ const GUID_HYPHENATED = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
  * no key-based exemption can reach — this form is turned off entirely; see
  * StripOptions.
  */
-const GUID_COMPACT = /(?<![0-9a-z])[0-9a-f]{32}(?![0-9a-z])/gi;
+const GUID_COMPACT = /(?:(?<![0-9a-z])|(?<=%[0-9a-f]{2}))[0-9a-f]{32}(?![0-9a-z])/gi;
 
 /**
  * Alias map: the same GUID gets the same marker everywhere it appears. The scope
@@ -133,7 +145,13 @@ export function stripGuids(text: string, aliases?: GuidAliases, opts?: StripOpti
   }
   const seen = aliases ?? createGuidAliases();
   const replace = (match: string): string => {
-    const key = match.toLowerCase();
+    // Hyphens out before the lookup: `3f2504e0-4f89-…` and `3f2504e04f89…` are
+    // the SAME identifier, and the contract above promises one marker per GUID
+    // within an item. Keying on the raw spelling gave one item two markers for
+    // one patient.
+    // .replace(/-/g) rather than replaceAll: this file is copied verbatim into
+    // packages with older compile targets, so it stays on the lowest common API.
+    const key = match.toLowerCase().replace(/-/g, "");
     const existing = seen.get(key);
     if (existing !== undefined) {
       return existing;

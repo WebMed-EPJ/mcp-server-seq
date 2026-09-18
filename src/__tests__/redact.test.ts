@@ -208,6 +208,27 @@ describe('the production guard on the redaction opt-out', () => {
     expect(redactionOptOutAllowed()).toEqual({ allowed: false, host: null });
   });
 
+  it('ignores the port when identifying the instance', () => {
+    // A local Seq listens on 5341; URL.host would read that as 'localhost:5341'
+    // and refuse the opt-out on the very instance it is meant for.
+    process.env.SEQ_BASE_URL = 'http://localhost:5341';
+    expect(redactionOptOutAllowed()).toEqual({ allowed: true, host: 'localhost' });
+    process.env.SEQ_BASE_URL = 'https://seq.intern.webmed.no:8443';
+    expect(redactionOptOutAllowed().allowed).toBe(false);
+  });
+
+  it('cannot be side-stepped with a trailing-dot spelling of production', () => {
+    // seq.intern.webmed.no. is the same host to DNS but not to a string compare,
+    // so without canonicalisation this spelling both misses the production list
+    // AND can be added to the extension list to unlock it.
+    process.env.SEQ_BASE_URL = 'https://seq.intern.webmed.no.';
+    expect(redactionOptOutAllowed()).toEqual({ allowed: false, host: 'seq.intern.webmed.no' });
+    process.env.SEQ_NON_PRODUCTION_HOSTS = 'seq.intern.webmed.no.';
+    expect(redactionOptOutAllowed().allowed).toBe(false);
+    process.env.SEQ_BASE_URL = 'https://seq.intern.webmed.no.:5341';
+    expect(redactionOptOutAllowed().allowed).toBe(false);
+  });
+
   it('lets SEQ_NON_PRODUCTION_HOSTS add a host but never the production one', () => {
     process.env.SEQ_NON_PRODUCTION_HOSTS = 'seq.lab.example.no, seq.intern.webmed.no';
     process.env.SEQ_BASE_URL = 'https://seq.lab.example.no';

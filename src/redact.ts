@@ -49,13 +49,30 @@ const PRODUCTION_SEQ_HOSTS = ['seq.intern.webmed.no'];
  * only ADD hosts and never overrides PRODUCTION_SEQ_HOSTS.
  */
 const NON_PRODUCTION_SEQ_HOSTS = ['seq.k8s.webmedepj.no', 'localhost', '127.0.0.1', '[::1]'];
+// NB. these are HOSTNAMES, never host:port — canonicalHostname drops the port,
+// so a local Seq on :5341 matches the bare 'localhost' entry.
+
+/**
+ * One spelling per host, so the comparisons below cannot be side-stepped.
+ *
+ * Two normalisations, both load-bearing. The PORT is dropped (`URL.host` keeps
+ * it, so the documented local target `http://localhost:5341` did not match the
+ * allow-listed `localhost` — the opt-out was refused where it is meant to work).
+ * And ONE trailing dot is removed: `seq.intern.webmed.no.` is the same host as
+ * `seq.intern.webmed.no` to DNS, but not to a string compare — so without this
+ * the production entry could be side-stepped by spelling it with the dot and
+ * adding that spelling to SEQ_NON_PRODUCTION_HOSTS.
+ */
+function canonicalHostname(host: string): string {
+  return host.trim().toLowerCase().replace(/\.$/, '');
+}
 
 /** The host of the configured upstream Seq, or null when it cannot be read. */
 function seqHost(): string | null {
   const raw = process.env.SEQ_BASE_URL?.trim();
   if (!raw) return null;
   try {
-    return new URL(raw).host.toLowerCase();
+    return canonicalHostname(new URL(raw).hostname);
   } catch {
     // An unparseable URL is not a host we can clear — treat it as unknown.
     return null;
@@ -78,7 +95,7 @@ export function redactionOptOutAllowed(): { allowed: boolean; host: string | nul
   }
   const extra = (process.env.SEQ_NON_PRODUCTION_HOSTS ?? '')
     .split(',')
-    .map((h) => h.trim().toLowerCase())
+    .map(canonicalHostname)
     .filter((h) => h !== '' && !PRODUCTION_SEQ_HOSTS.includes(h));
   return { allowed: [...NON_PRODUCTION_SEQ_HOSTS, ...extra].includes(host), host };
 }
@@ -498,6 +515,19 @@ function seqPropertyName(node: Record<string, unknown>): string | null {
   return typeof node.Name === 'string' && 'Value' in node ? node.Name : null;
 }
 
+/**
+ * Keys whose array VALUE is a list of items rather than one item's members.
+ *
+ * `sql_query` answers with `{ Columns, Rows }` — or `Slices` for a time series —
+ * and the whole rowset arrives as ONE object, so without this every row would
+ * share the enclosing alias map and the same patient would read as `[GUID_1]` in
+ * row after row. That is precisely the cross-item linkage the per-item scope
+ * exists to remove, and a row-per-event query is an ordinary thing to write.
+ * An event's `Properties` array is NOT in this list: those are one event's
+ * members and must agree with each other.
+ */
+const ROWSET_KEYS = new Set(['rows', 'slices']);
+
 /** Threaded through redactDeep: one alias map per item, plus the exempt flag. */
 interface RedactContext {
   aliases: GuidAliases;
@@ -555,6 +585,16 @@ export async function redactDeep<T>(value: T, ctx?: RedactContext): Promise<T> {
         ctx.exempt ||
         isGuidExemptKey(key) ||
         (key === 'Value' && named !== null && isGuidExemptKey(named));
+      if (!exempt && ROWSET_KEYS.has(key.toLowerCase()) && Array.isArray(val)) {
+        // Each row is its own item: a fresh alias map, sequentially (the
+        // detector is a shared singleton — see redactText).
+        const rows: unknown[] = [];
+        for (const row of val) {
+          rows.push(await redactDeep(row, { aliases: createGuidAliases() }));
+        }
+        out[key] = rows;
+        continue;
+      }
       out[key] = await redactDeep(val, { aliases: ctx.aliases, exempt });
     }
     return out as unknown as T;
