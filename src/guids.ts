@@ -32,8 +32,8 @@
  * tool, that is the question to answer for each field it returns.
  *
  * Duplicated verbatim across every MCP package WebMed runs: the three here
- * (m365-privacy-connector, lime-crm-connector, services/lime-connect-bot) and
- * WebMed-EPJ/mcp-server-seq's src/guids.ts, like logger.ts and redaction.ts.
+ * (m365-privacy-connector, services/lime-connect-bot, services/mcp-redaction-proxy)
+ * and WebMed-EPJ/mcp-server-seq's src/guids.ts, like logger.ts and redaction.ts.
  * Each is github-sourced and separately bundled, so they cannot share a module.
  * Keep the copies byte-identical — a fix to these patterns must be diffable
  * straight across, including into the other repository — and CPD-excluded.
