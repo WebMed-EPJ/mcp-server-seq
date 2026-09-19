@@ -144,7 +144,8 @@ own `event-<32 hex>` id are bare 32-hex runs that no pattern can tell from an
 identifier, and masking them would cost request correlation across services and
 the paging cursor while protecting nobody. The exemption also understands Seq's
 `{ Name, Value }` property shape, so a property *named* `TraceId` keeps its value
-too. Everything else — `PatientId` included — is masked.
+too. The exemption covers the GUID step only — an exempt field still goes through
+the ordinary PII pass. Everything else — `PatientId` included — is masked.
 
 ### Turning redaction off (test instances only)
 

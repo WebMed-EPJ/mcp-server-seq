@@ -85,10 +85,12 @@ Three things follow, and they matter for how you investigate:
   carry a marker from an earlier result into a later one — re-run the query wide
   enough to hold everything you need to compare.
 
-Machine identifiers are deliberately **not** masked: `TraceId`, `SpanId`,
-`ParentId`, `ParentSpanId`, the event `Id` and its `Links` come through intact, so correlating a
+Machine identifiers skip the **GUID** pass: `TraceId`, `SpanId`, `ParentId`,
+`ParentSpanId`, the event `Id` and its `Links` keep their ids, so correlating a
 request across services and paging with `after` work exactly as before. Use those
-for correlation — they are what they are for.
+for correlation — they are what they are for. They are not exempt from redaction
+as such: the ordinary PII pass still runs on them, so treat a marker in one of
+these fields as a redaction like any other, not as a malformed id.
 
 ## Query cost — how not to time out
 
