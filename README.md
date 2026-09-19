@@ -124,12 +124,19 @@ also appear inside rendered messages. Neither the fødselsnummer pattern nor the
 name dictionary catches that, so every string returned from Seq additionally goes
 through a pure, unfailable GUID pass (`src/guids.ts`, the byte-identical copy of
 the one in `WebMed-EPJ/claude-plugins`). Each GUID becomes `[GUID_1]`,
-`[GUID_2]`, … numbered **per event**, so a property and the message quoting it
-agree while two events referencing the same patient stay unlinkable. A
-`sql_query` rowset is numbered **per row** for the same reason — one object holds
-every row, so without that rule a row-per-event query would show one patient as
-the same marker down the whole column. Both spellings of a GUID (hyphenated and
-32-hex) share one marker: they are one identifier.
+`[GUID_2]`, … numbered **per response**: one alias map serves the whole answer,
+so an identifier keeps the same marker in a property, in the message quoting it,
+in the next event and down a `sql_query` column. That linkage is the point — a
+log is read to follow one request, and markers that restarted per event would
+make the lines of one session look unrelated. It does not extend across calls:
+the map is allocated per request in encounter order and never stored, so markers
+from two answers cannot be compared and are not a pseudonym. Both spellings of a
+GUID (hyphenated and 32-hex) share one marker: they are one identifier.
+
+This is a deliberate difference from the m365 connector, which scopes the map per
+returned **item**. There a page holds unrelated mail and documents, so a shared
+marker would assert a link nobody asked for; here the answer is one log, and the
+link is what the reader came for.
 
 Machine identifiers are exempt by field (`GUID_EXEMPT_KEYS`): `TraceId`,
 `SpanId`, `ParentId`, `ParentSpanId`, `Id` and `Links`. A W3C trace id and Seq's

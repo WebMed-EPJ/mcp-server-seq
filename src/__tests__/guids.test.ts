@@ -37,7 +37,7 @@ describe('GUID masking in Seq payloads', () => {
     };
     const out = await redactDeep(event);
     // The identifier the control exists for — masked in the message and in the
-    // property, with the SAME marker, because one event is one item.
+    // property, with the SAME marker: one map serves the whole response.
     expect(out.RenderedMessage).toBe('Journal åpnet for [GUID_1]');
     expect(out.Properties[0].Value).toBe('[GUID_1]');
     // Handles survive: masking these costs request correlation and the paging
@@ -57,16 +57,19 @@ describe('GUID masking in Seq payloads', () => {
     expect(out.Value).toBe('[GUID_1]');
   });
 
-  it('numbers aliases per EVENT, not per page', async () => {
-    // Two events referencing the same patient must not be linkable through their
-    // markers — that is the linkage the mask exists to remove.
+  it('numbers aliases per RESPONSE, so two events about one patient link up', async () => {
+    // A log is read to follow one request end to end, so an identifier must keep
+    // ONE marker across every event in the answer. Per-event numbering would
+    // restart at [GUID_1] in the second event and make the two look unrelated,
+    // which is the opposite of what the reader came for.
     const page = await redactDeep([
       { RenderedMessage: `først ${OTHER_GUID}`, Extra: `og ${PATIENT_GUID}` },
       { RenderedMessage: `samme pasient ${PATIENT_GUID}` },
     ]);
     expect(page[0].RenderedMessage).toBe('først [GUID_1]');
     expect(page[0].Extra).toBe('og [GUID_2]');
-    expect(page[1].RenderedMessage).toBe('samme pasient [GUID_1]');
+    // The SAME patient, two events apart, keeps [GUID_2] rather than restarting.
+    expect(page[1].RenderedMessage).toBe('samme pasient [GUID_2]');
   });
 
   it('is skipped with the rest of redaction against the test instance', async () => {
@@ -94,26 +97,26 @@ describe('alias scope inside a tabular query result', () => {
     delete process.env.SEQ_BASE_URL;
   });
 
-  it('numbers each ROW independently, like each event', async () => {
-    // sql_query answers with one object holding every row, so without a rowset
-    // rule the whole result would share an alias map and the same patient would
-    // read as [GUID_1] in row after row — the cross-item linkage the per-item
-    // scope exists to remove. A row-per-event query is an ordinary thing to write.
+  it('shares the response map across ROWS, so a column reads consistently', async () => {
+    // A row-per-event sql_query is the normal shape, and grouping its rows by
+    // patient is the normal reason to run one. Two GUIDs, so the assertion can
+    // tell a shared map from a per-row one: with per-row numbering both rows
+    // would start again at [GUID_1] and the second row's two ids would swap.
     const rowset = {
       Columns: ['Message', 'Count'],
       Rows: [
-        [`Journal åpnet for ${PATIENT_GUID}`, 3],
-        [`Samme pasient ${PATIENT_GUID}`, 1],
+        [`Journal åpnet for ${OTHER_GUID}`, 3],
+        [`Samme pasient ${PATIENT_GUID}, ikke ${OTHER_GUID}`, 1],
       ],
     };
     const out = await redactDeep(rowset);
     expect(out.Rows[0][0]).toBe('Journal åpnet for [GUID_1]');
-    expect(out.Rows[1][0]).toBe('Samme pasient [GUID_1]');
+    expect(out.Rows[1][0]).toBe('Samme pasient [GUID_2], ikke [GUID_1]');
     expect(out.Rows[0][1]).toBe(3);
   });
 
   it('keeps an event Properties array sharing ONE map', async () => {
-    // The opposite case: these are one event's members and must agree.
+    // An event's own members must agree with each other too.
     const event = {
       RenderedMessage: `sak ${PATIENT_GUID}`,
       Properties: [{ Name: 'PatientId', Value: PATIENT_GUID }],

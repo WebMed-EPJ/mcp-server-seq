@@ -122,12 +122,16 @@ from `src/`. `esbuild` is pinned to an exact version so the bundle is byte-repro
 - **GUIDs are masked too** (`src/guids.ts`, byte-identical to the copy in
   `WebMed-EPJ/claude-plugins` — keep them diffable): a WebMed patient is identified by a GUID and
   the logs carry them, in a `PatientId` property and inside rendered messages. Pure, unfailable
-  string pass, applied before the detector. Markers are `[GUID_n]`, numbered **per event** (an array
-  handed to `redactDeep` is a page of items, each with its own alias map) so two events referencing
-  one patient are not linkable, while a property and the message quoting it agree. `ROWSET_KEYS`
-  (`Rows`, `Slices`) extends that to `sql_query`, whose rows all arrive inside ONE object — without
-  it a row-per-event query showed one patient as the same marker down the column. An event's
-  `Properties` array is deliberately NOT in that set: those are one event's members.
+  string pass, applied before the detector. Markers are `[GUID_n]`, numbered **per RESPONSE**: the
+  top-level `redactDeep` call allocates ONE alias map and threads it through every event, property
+  and `sql_query` row below it. That is the OPPOSITE scope from the m365 connector's per-item rule,
+  and deliberately so — a log is read to follow one request, so the same identifier must carry the
+  same marker across the whole answer or the session's lines read as unrelated; m365 returns
+  unrelated mail and documents in one page, where a shared marker would assert a link nobody asked
+  for. What is not given up: the map is per CALL, in encounter order, never stored, so markers from
+  two answers cannot be compared and are not a pseudonym. (An earlier revision scoped this per event
+  with a `ROWSET_KEYS` carve-out for `Rows`/`Slices`; both are gone — do not reintroduce them
+  without the product decision behind them changing.)
 - `GUID_EXEMPT_KEYS` (`TraceId`, `SpanId`, `ParentId`, `ParentSpanId`, `Id`, `Links`) keep their
   values: a W3C trace id and Seq's own `event-<32 hex>` id are bare 32-hex runs no pattern can tell
   from an identifier, and masking them costs request correlation and the paging cursor while

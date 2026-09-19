@@ -515,20 +515,7 @@ function seqPropertyName(node: Record<string, unknown>): string | null {
   return typeof node.Name === 'string' && 'Value' in node ? node.Name : null;
 }
 
-/**
- * Keys whose array VALUE is a list of items rather than one item's members.
- *
- * `sql_query` answers with `{ Columns, Rows }` — or `Slices` for a time series —
- * and the whole rowset arrives as ONE object, so without this every row would
- * share the enclosing alias map and the same patient would read as `[GUID_1]` in
- * row after row. That is precisely the cross-item linkage the per-item scope
- * exists to remove, and a row-per-event query is an ordinary thing to write.
- * An event's `Properties` array is NOT in this list: those are one event's
- * members and must agree with each other.
- */
-const ROWSET_KEYS = new Set(['rows', 'slices']);
-
-/** Threaded through redactDeep: one alias map per item, plus the exempt flag. */
+/** Threaded through redactDeep: the response's alias map, plus the exempt flag. */
 interface RedactContext {
   aliases: GuidAliases;
   exempt?: boolean;
@@ -546,17 +533,21 @@ interface RedactContext {
 export async function redactDeep<T>(value: T, ctx?: RedactContext): Promise<T> {
   if (!isRedactionEnabled()) return value;
 
-  // Top-level entry: an array is a page of ITEMS, so each element gets its own
-  // GUID alias map. Sharing one across the page would make the same [GUID_n] in
-  // two events say they concern the same patient — the linkage the mask removes.
-  // Within one event the map IS shared, so a property and the rendered message
-  // that quotes it agree. (Same rule as the WebMed m365/Lime connectors.)
+  // Top-level entry: ONE alias map for the whole response, threaded through
+  // every event, property and row below it. That is a deliberate difference from
+  // the m365 connector, which scopes the map per returned ITEM.
+  //
+  // Here the linkage is the POINT. A log is read to follow one request, and the
+  // question asked of Seq is "what happened to this patient" — so the same
+  // identifier must carry the same [GUID_n] in the exception, in the message
+  // that quotes it, and in the twenty other events of the same session, or the
+  // answer is a pile of lines nobody can join up. m365 returns unrelated mail
+  // and documents in one page, where the same reasoning runs the other way.
+  //
+  // What is NOT given up: the markers are per CALL, allocated in encounter order
+  // and never written down, so they cannot be compared across two responses and
+  // are not a pseudonym. The GUID itself is still unrecoverable.
   if (ctx === undefined) {
-    if (Array.isArray(value)) {
-      const items: unknown[] = [];
-      for (const item of value) items.push(await redactDeep(item, { aliases: createGuidAliases() }));
-      return items as unknown as T;
-    }
     return redactDeep(value, { aliases: createGuidAliases() });
   }
 
@@ -585,16 +576,6 @@ export async function redactDeep<T>(value: T, ctx?: RedactContext): Promise<T> {
         ctx.exempt ||
         isGuidExemptKey(key) ||
         (key === 'Value' && named !== null && isGuidExemptKey(named));
-      if (!exempt && ROWSET_KEYS.has(key.toLowerCase()) && Array.isArray(val)) {
-        // Each row is its own item: a fresh alias map, sequentially (the
-        // detector is a shared singleton — see redactText).
-        const rows: unknown[] = [];
-        for (const row of val) {
-          rows.push(await redactDeep(row, { aliases: createGuidAliases() }));
-        }
-        out[key] = rows;
-        continue;
-      }
       out[key] = await redactDeep(val, { aliases: ctx.aliases, exempt });
     }
     return out as unknown as T;

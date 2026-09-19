@@ -28560,15 +28560,9 @@ function isGuidExemptKey(key) {
 function seqPropertyName(node) {
   return typeof node.Name === "string" && "Value" in node ? node.Name : null;
 }
-var ROWSET_KEYS = /* @__PURE__ */ new Set(["rows", "slices"]);
 async function redactDeep(value, ctx) {
   if (!isRedactionEnabled()) return value;
   if (ctx === void 0) {
-    if (Array.isArray(value)) {
-      const items = [];
-      for (const item of value) items.push(await redactDeep(item, { aliases: createGuidAliases() }));
-      return items;
-    }
     return redactDeep(value, { aliases: createGuidAliases() });
   }
   if (typeof value === "string") {
@@ -28584,14 +28578,6 @@ async function redactDeep(value, ctx) {
     const named = seqPropertyName(value);
     for (const [key, val] of Object.entries(value)) {
       const exempt = ctx.exempt || isGuidExemptKey(key) || key === "Value" && named !== null && isGuidExemptKey(named);
-      if (!exempt && ROWSET_KEYS.has(key.toLowerCase()) && Array.isArray(val)) {
-        const rows = [];
-        for (const row of val) {
-          rows.push(await redactDeep(row, { aliases: createGuidAliases() }));
-        }
-        out[key] = rows;
-        continue;
-      }
       out[key] = await redactDeep(val, { aliases: ctx.aliases, exempt });
     }
     return out;
