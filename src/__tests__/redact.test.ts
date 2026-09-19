@@ -1,4 +1,7 @@
-import { redactText, redactDeep } from '../redact.js';
+import { assertRedactionConfig, redactionOptOutAllowed, redactText, redactDeep } from '../redact.js';
+
+const TEST_SEQ = 'https://seq.k8s.webmedepj.no';
+const PROD_SEQ = 'https://seq.intern.webmed.no';
 
 // Structurally valid (synthetic) Norwegian identity numbers with correct
 // MOD11 control digits, used to verify detection without using a real
@@ -11,6 +14,8 @@ const FH_NUMBER = '81234567055'; // FH-number: first digit 8, no date
 describe('redactText', () => {
   beforeEach(() => {
     delete process.env.SEQ_REDACTION_ENABLED;
+    delete process.env.SEQ_BASE_URL;
+    delete process.env.SEQ_NON_PRODUCTION_HOSTS;
   });
 
   it('masks a valid Norwegian fødselsnummer', async () => {
@@ -114,11 +119,30 @@ describe('redactText', () => {
     expect(await redactText(input)).toBe(input);
   });
 
-  it('returns text unchanged when redaction is disabled', async () => {
+  it('returns text unchanged when redaction is disabled against the TEST instance', async () => {
     process.env.SEQ_REDACTION_ENABLED = 'false';
+    process.env.SEQ_BASE_URL = TEST_SEQ;
     const input = `Pasient ${VALID_FNR}, kari.nordmann@helse-bergen.no`;
     const out = await redactText(input);
     expect(out).toBe(input);
+  });
+
+  it('keeps redacting when the opt-out is set against PRODUCTION', async () => {
+    process.env.SEQ_REDACTION_ENABLED = 'false';
+    process.env.SEQ_BASE_URL = PROD_SEQ;
+    const out = await redactText(`Pasient ${VALID_FNR}`);
+    expect(out).not.toContain(VALID_FNR);
+  });
+
+  it('keeps redacting when the opt-out is set against an UNKNOWN instance', async () => {
+    // Fail-closed: an instance we cannot identify — a new host, a typo, an unset
+    // SEQ_BASE_URL — is treated as production, because guessing wrong the other
+    // way puts patient data in front of a model.
+    process.env.SEQ_REDACTION_ENABLED = 'false';
+    process.env.SEQ_BASE_URL = 'https://seq.somewhere-new.webmed.no';
+    expect(await redactText(`Pasient ${VALID_FNR}`)).not.toContain(VALID_FNR);
+    delete process.env.SEQ_BASE_URL;
+    expect(await redactText(`Pasient ${VALID_FNR}`)).not.toContain(VALID_FNR);
   });
 });
 
@@ -161,5 +185,71 @@ describe('redactDeep', () => {
     const out = await redactDeep({ NationalId: numeric });
     expect(String(out.NationalId)).not.toBe(String(numeric));
     expect(String(out.NationalId)).toContain('FNR');
+  });
+});
+
+describe('the production guard on the redaction opt-out', () => {
+  beforeEach(() => {
+    delete process.env.SEQ_REDACTION_ENABLED;
+    delete process.env.SEQ_BASE_URL;
+    delete process.env.SEQ_NON_PRODUCTION_HOSTS;
+  });
+
+  it('allows the opt-out only against a known non-production host', () => {
+    process.env.SEQ_BASE_URL = TEST_SEQ;
+    expect(redactionOptOutAllowed()).toEqual({ allowed: true, host: 'seq.k8s.webmedepj.no' });
+    process.env.SEQ_BASE_URL = PROD_SEQ;
+    expect(redactionOptOutAllowed()).toEqual({ allowed: false, host: 'seq.intern.webmed.no' });
+  });
+
+  it('treats an unset or unparseable SEQ_BASE_URL as production', () => {
+    expect(redactionOptOutAllowed()).toEqual({ allowed: false, host: null });
+    process.env.SEQ_BASE_URL = 'not a url';
+    expect(redactionOptOutAllowed()).toEqual({ allowed: false, host: null });
+  });
+
+  it('ignores the port when identifying the instance', () => {
+    // A local Seq listens on 5341; URL.host would read that as 'localhost:5341'
+    // and refuse the opt-out on the very instance it is meant for.
+    process.env.SEQ_BASE_URL = 'http://localhost:5341';
+    expect(redactionOptOutAllowed()).toEqual({ allowed: true, host: 'localhost' });
+    process.env.SEQ_BASE_URL = 'https://seq.intern.webmed.no:8443';
+    expect(redactionOptOutAllowed().allowed).toBe(false);
+  });
+
+  it('cannot be side-stepped with a trailing-dot spelling of production', () => {
+    // seq.intern.webmed.no. is the same host to DNS but not to a string compare,
+    // so without canonicalisation this spelling both misses the production list
+    // AND can be added to the extension list to unlock it.
+    process.env.SEQ_BASE_URL = 'https://seq.intern.webmed.no.';
+    expect(redactionOptOutAllowed()).toEqual({ allowed: false, host: 'seq.intern.webmed.no' });
+    process.env.SEQ_NON_PRODUCTION_HOSTS = 'seq.intern.webmed.no.';
+    expect(redactionOptOutAllowed().allowed).toBe(false);
+    process.env.SEQ_BASE_URL = 'https://seq.intern.webmed.no.:5341';
+    expect(redactionOptOutAllowed().allowed).toBe(false);
+  });
+
+  it('lets SEQ_NON_PRODUCTION_HOSTS add a host but never the production one', () => {
+    process.env.SEQ_NON_PRODUCTION_HOSTS = 'seq.lab.example.no, seq.intern.webmed.no';
+    process.env.SEQ_BASE_URL = 'https://seq.lab.example.no';
+    expect(redactionOptOutAllowed().allowed).toBe(true);
+    // The hard-coded production host is dropped from the extension list, so the
+    // env var cannot be used to unlock the instance the guard exists for.
+    process.env.SEQ_BASE_URL = PROD_SEQ;
+    expect(redactionOptOutAllowed().allowed).toBe(false);
+  });
+
+  it('refuses to start when the opt-out is set against production', () => {
+    process.env.SEQ_REDACTION_ENABLED = 'false';
+    process.env.SEQ_BASE_URL = PROD_SEQ;
+    expect(() => assertRedactionConfig()).toThrow(/SEQ_REDACTION_ENABLED=false is refused/);
+    expect(() => assertRedactionConfig()).toThrow(/seq\.intern\.webmed\.no/);
+  });
+
+  it('starts silently when redaction is on, or off against test', () => {
+    expect(() => assertRedactionConfig()).not.toThrow();
+    process.env.SEQ_REDACTION_ENABLED = 'false';
+    process.env.SEQ_BASE_URL = TEST_SEQ;
+    expect(() => assertRedactionConfig()).not.toThrow();
   });
 });

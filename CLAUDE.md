@@ -119,7 +119,38 @@ from `src/`. `esbuild` is pinned to an exact version so the bundle is byte-repro
 - All log data returned from Seq passes through `redactDeep` (`src/redact.ts`) before
   leaving the server, masking Norwegian personal data: fødselsnummer (incl. D/H/FH-numbers),
   person names (curated dictionary), phone numbers, and emails.
-- Enabled by default; set `SEQ_REDACTION_ENABLED=false` to disable (e.g. local debugging
-  against an instance with no real personal data).
+- **GUIDs are masked too** (`src/guids.ts`, byte-identical to the copy in
+  `WebMed-EPJ/claude-plugins` — keep them diffable): a WebMed patient is identified by a GUID and
+  the logs carry them, in a `PatientId` property and inside rendered messages. Pure, unfailable
+  string pass, applied before the detector. Markers are `[GUID_n]`, numbered **per RESPONSE**: the
+  top-level `redactDeep` call allocates ONE alias map and threads it through every event, property
+  and `sql_query` row below it. That is the OPPOSITE scope from the m365 connector's per-item rule,
+  and deliberately so — a log is read to follow one request, so the same identifier must carry the
+  same marker across the whole answer or the session's lines read as unrelated; m365 returns
+  unrelated mail and documents in one page, where a shared marker would assert a link nobody asked
+  for. What is not given up: the map is per CALL, in encounter order, never stored, so markers from
+  two answers cannot be compared and are not a pseudonym. (An earlier revision scoped this per event
+  with a `ROWSET_KEYS` carve-out for `Rows`/`Slices`; both are gone — do not reintroduce them
+  without the product decision behind them changing.)
+- `GUID_EXEMPT_KEYS` (`TraceId`, `SpanId`, `ParentId`, `ParentSpanId`, `Id`, `Links`) keep their
+  values: a W3C trace id and Seq's own `event-<32 hex>` id are bare 32-hex runs no pattern can tell
+  from an identifier, and masking them costs request correlation and the paging cursor while
+  protecting nobody. The exemption is inherited by the subtree (so `Links.Self` is covered) and
+  understands Seq's `{ Name, Value }` property shape, where the key that decides is the sibling
+  `Name`. Exempt fields still get the ordinary PII pass — only the GUID step is skipped. Keep the
+  list short: each entry is a field where a GUID survives.
+- Enabled by default; `SEQ_REDACTION_ENABLED=false` disables the whole step (GUID pass included) but
+  is honoured **only** against a Seq instance known to hold no personal data. `redactionOptOutAllowed`
+  is an ALLOW-list of hosts (test, localhost, plus `SEQ_NON_PRODUCTION_HOSTS`, which is additive and
+  can never unlock the hard-coded `seq.intern.webmed.no`); an unknown host, an unparseable URL or an
+  unset `SEQ_BASE_URL` all read as production. Comparison goes through `canonicalHostname`, and both
+  normalisations are load-bearing: the PORT is dropped (`URL.host` keeps it, so the documented
+  `http://localhost:5341` was refused on the very instance the opt-out is for) and ONE trailing dot
+  is stripped (`seq.intern.webmed.no.` is the same host to DNS but not to a string compare, so
+  otherwise it both missed the production list and could be added to the extension list to unlock
+  it). Two halves on purpose: `assertRedactionConfig()` runs
+  in BOTH entry points and refuses to start (a dead pod is visible to whoever deployed it; a silent
+  override is not), and `isRedactionEnabled()` fails closed anyway, so a path that forgets the check
+  still redacts.
 - Redaction runs entirely in-process — no log content is sent anywhere.
 - See `README.md` for covered data types and known limitations.
