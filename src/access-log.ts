@@ -51,7 +51,37 @@ export function callerId(authInfo: AuthInfo | undefined): string {
 }
 
 // `any` is required here to accept every tool/resource callback shape.
-type AnyHandler = (...args: any[]) => any;
+export type AnyHandler = (...args: any[]) => any;
+
+/** Options for `withAccessLog`. */
+export interface AccessLogOptions {
+  /**
+   * Refuse a call from a shared service account that supplies no audit label.
+   *
+   * The label only ever answered a question about SHARED service-account
+   * clients (Claude Tag and the like), where every call carries the same
+   * `service:<clientId>` caller: an interactive user is already identified by
+   * their own Entra `homeAccountId`, so requiring it of them added nothing but
+   * a failure mode — a client that omitted the field got an opaque schema
+   * validation error instead of a result. Hence: optional in the schema,
+   * enforced HERE, and only where it carries information.
+   *
+   * Tools only. The `signals` resource takes no arguments at all, so a service
+   * caller has no way to supply one and must not be refused.
+   */
+  requireAuditLabel?: boolean;
+}
+
+/** True when the authenticated caller is a shared service account, not a person. */
+function isServiceCaller(caller: string): boolean {
+  return caller.startsWith("service:");
+}
+
+/** The refusal a service caller gets when it omits the audit label. */
+export const MISSING_AUDIT_LABEL_MESSAGE =
+  "This connection authenticates as a shared service account, so every tool call must " +
+  "carry 'triggered_by_user': the name or id of the person the call is made on behalf of. " +
+  "Retry the same call with that field set.";
 
 /** Hash the bounded caller-supplied audit label before it reaches the logger. */
 function triggeredByUser(args: unknown): string | undefined {
@@ -72,12 +102,34 @@ function triggeredByUser(args: unknown): string | undefined {
  * uri/variables, ...), so this wraps `server.tool()` and `server.resource()`
  * callbacks uniformly without depending on their exact arity.
  */
-export function withAccessLog<T extends AnyHandler>(logger: Logger, name: string, handler: T): T {
+export function withAccessLog<T extends AnyHandler>(
+  logger: Logger,
+  name: string,
+  handler: T,
+  options: AccessLogOptions = {},
+): T {
   const wrapped = async (...args: Parameters<T>): Promise<Awaited<ReturnType<T>>> => {
     const extra = args[args.length - 1] as { authInfo?: AuthInfo } | undefined;
     const caller = callerId(extra?.authInfo);
     const humanCaller = triggeredByUser(args[0]);
     const startedAt = Date.now();
+
+    if (options.requireAuditLabel && !humanCaller && isServiceCaller(caller)) {
+      // Refused as a tool RESULT rather than a thrown error: the model reads
+      // it and retries with the field, where a transport-level error surfaces
+      // as a connector malfunction.
+      logger.error("tool call", {
+        tool: name,
+        caller,
+        status: "error",
+        ms: 0,
+        errorName: "MissingAuditLabel",
+      });
+      return {
+        content: [{ type: "text", text: MISSING_AUDIT_LABEL_MESSAGE }],
+        isError: true,
+      } as Awaited<ReturnType<T>>;
+    }
     try {
       const result = await handler(...args);
       const isError = Boolean(result && typeof result === "object" && (result as { isError?: unknown }).isError);

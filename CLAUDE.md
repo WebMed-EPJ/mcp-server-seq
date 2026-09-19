@@ -32,6 +32,26 @@ Requires Node.js >= 20 (see `engines` in package.json).
   at all (the stdio entry point, which has no per-request auth) it reports the fixed caller `"stdio"`.
   `AuthInfo`/`extra` is always the LAST positional argument to any MCP tool/resource callback
   regardless of its declared arity, which is what makes one generic wrapper work for all of them.
+  The caller-supplied `triggered_by_user` audit label is **optional in the zod schema and enforced
+  here** (`AccessLogOptions.requireAuditLabel`, set for the four TOOLS, not for the argument-less
+  `signals` resource), and only when the caller is a SHARED service account (`service:<clientId>`):
+  that is the only case where the label carries information, since an interactive user is already
+  identified by their own Entra `homeAccountId`. As a required schema field it bought no audit value
+  from interactive callers and cost them the whole call — a client that omitted it got
+  `MCP error -32602: Invalid arguments … triggered_by_user Required`, thrown by the SDK before any
+  handler ran. A service call without it is refused as a tool RESULT (`isError: true`,
+  `MISSING_AUDIT_LABEL_MESSAGE`) so the model reads it and retries with the field, rather than the
+  client reporting a connector malfunction.
+- **Tool annotations** — all four tools are registered with `server.registerTool(...)` carrying
+  `READ_ONLY_TOOL` (`readOnlyHint`/`openWorldHint`, both true — every tool here reads) plus a
+  human `title`. Same convention as the m365/lime connectors, and the reason is the same: a
+  connector UI (claude.ai → Settings → Connectors) groups and gates tools by `readOnlyHint`, and
+  with no annotations at all every tool lands in one "Other tools" bucket. Annotations are hints
+  (the spec says clients must treat them as untrusted) — the redaction and access log remain the
+  enforcement. `src/__tests__/server.test.ts` drives a real MCP client over an in-memory transport
+  and reads `tools/list`, so the annotations and the optional `triggered_by_user` cannot regress
+  silently. A client must re-read `tools/list` (reconnect the connector) after a redeploy before
+  the grouping shows up.
 - **`src/remote.ts`** — the **remote HTTP** entry point (Docker). Serves the same tools over an
   OAuth-protected **Streamable HTTP** `/mcp` endpoint (Express). Authorization is a full OAuth 2.1
   flow (DCR + PKCE) federated to **Microsoft Entra** — the same model as the WebMed Lime/m365

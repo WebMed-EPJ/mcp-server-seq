@@ -1,6 +1,6 @@
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { createHash } from "node:crypto";
-import { callerId, withAccessLog } from "../access-log.js";
+import { MISSING_AUDIT_LABEL_MESSAGE, callerId, withAccessLog } from "../access-log.js";
 import { createLogger } from "../logger.js";
 
 function authInfo(extra: Record<string, unknown> | undefined): AuthInfo {
@@ -174,5 +174,72 @@ describe("withAccessLog", () => {
     await wrapped({});
 
     expect(lines[0]).toContain('"caller":"stdio"');
+  });
+});
+
+describe("requireAuditLabel", () => {
+  /** A stand-in handler that records whether it ran (no `jest` global under ESM). */
+  function countingHandler() {
+    const state = { calls: 0 };
+    const handler = async (..._args: unknown[]) => {
+      state.calls += 1;
+      return { content: [{ type: "text" as const, text: "ran" }] };
+    };
+    return { state, handler };
+  }
+
+  it("refuses a shared service account that supplies no audit label", async () => {
+    const lines: string[] = [];
+    const logger = createLogger({ sink: (l) => lines.push(l), now: () => "T" });
+    const { state, handler } = countingHandler();
+
+    const wrapped = withAccessLog(logger, "sql_query", handler, { requireAuditLabel: true });
+    const result = await wrapped({}, { authInfo: authInfo({ homeAccountId: "service:claude-tag" }) });
+
+    expect(state.calls).toBe(0);
+    expect(result).toEqual({
+      content: [{ type: "text", text: MISSING_AUDIT_LABEL_MESSAGE }],
+      isError: true,
+    });
+    expect(lines[0]).toContain('"errorName":"MissingAuditLabel"');
+    expect(lines[0]).toContain('"caller":"service:claude-tag"');
+  });
+
+  it("lets an interactive user through without a label — Entra already identifies them", async () => {
+    const lines: string[] = [];
+    const logger = createLogger({ sink: (l) => lines.push(l), now: () => "T" });
+    const { state, handler } = countingHandler();
+
+    const wrapped = withAccessLog(logger, "get_events", handler, { requireAuditLabel: true });
+    await wrapped({ filter: "@Level = 'Error'" }, { authInfo: authInfo({ homeAccountId: "abc.def" }) });
+
+    expect(state.calls).toBe(1);
+    expect(lines[0]).toContain('"status":"ok"');
+    expect(lines[0]).not.toContain("triggeredByUser");
+  });
+
+  it("lets the stdio entry point through without a label", async () => {
+    const logger = createLogger({ sink: () => {}, now: () => "T" });
+    const { state, handler } = countingHandler();
+
+    const wrapped = withAccessLog(logger, "get_signals", handler, { requireAuditLabel: true });
+    await wrapped({});
+
+    expect(state.calls).toBe(1);
+  });
+
+  it("runs a service call that DOES carry a label", async () => {
+    const lines: string[] = [];
+    const logger = createLogger({ sink: (l) => lines.push(l), now: () => "T" });
+    const { state, handler } = countingHandler();
+
+    const wrapped = withAccessLog(logger, "sql_query", handler, { requireAuditLabel: true });
+    await wrapped(
+      { triggered_by_user: "jane.doe" },
+      { authInfo: authInfo({ homeAccountId: "service:claude-tag" }) },
+    );
+
+    expect(state.calls).toBe(1);
+    expect(lines[0]).toContain('"status":"ok"');
   });
 });
