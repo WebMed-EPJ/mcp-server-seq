@@ -214,10 +214,12 @@ and log content out of the access log mirrors the redaction discipline above
 log content from leaving the process unmasked, so the access log must not
 become a side channel that reintroduces it.
 
-`triggered_by_user` is **required only when the connection authenticates as a
-shared service account** (`caller` is `service:<client-id>`), where every call
-would otherwise be attributed to the same client — a service call without it is
-refused with a message telling the caller to retry with the field set. For an
+`triggered_by_user` is **required on a TOOL call only when the connection
+authenticates as a shared service account** (`caller` is `service:<client-id>`),
+where every call would otherwise be attributed to the same client — such a tool
+call without it is refused with a message telling the caller to retry with the
+field set. The `signals` resource takes no arguments at all, so a service caller
+has no way to supply a label there and its reads are logged without one. For an
 interactive user the field is optional: their Entra `homeAccountId` already
 identifies them in `caller`, so requiring it added no audit value and instead
 failed the whole call with an opaque schema-validation error whenever a client
