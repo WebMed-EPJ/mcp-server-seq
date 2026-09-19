@@ -29,10 +29,19 @@ MCP Server for Seq's API endpoints for interacting with your logging and monitor
   - Scope to signals; flexible/relative time range (defaults to last 24h)
   - Use this instead of `get_events` for counts/rollups — the aggregation runs
     server-side rather than pulling raw rows and counting client-side
-  - Example: `select RequestPath, count(*) from stream where StatusCode >= 500 group by RequestPath order by count(*) desc limit 20`
+  - Example: `select count(*) as n from stream where StatusCode >= 500 group by RequestPath order by n desc limit 20` (label the aggregate to sort on it, and do not select the grouping column — Seq rejects both with a 400)
 
 #### Alert Management
 - `get_alert_state` - Retrieve the current state of alerts
+
+#### Tool annotations
+Every tool reads Seq and changes nothing, so all four are published with
+`readOnlyHint: true` (and `openWorldHint: true`, since Seq is an external
+system). These are hints, not enforcement — their job is to let a connector UI
+(claude.ai → Settings → Connectors) group and gate the tools; with no
+annotations they all land in one "Other tools" bucket. A client must re-read
+`tools/list` — refresh the tool list, or reconnect the connector — after the
+hosted server is redeployed before the grouping changes.
 
 ### Resources
 
@@ -198,18 +207,23 @@ Each line records:
 
 **Never logged:** the tool's operational input arguments (e.g. the Seq query
 text, event filters, time ranges) or any part of its result (event/log
-content). The required `triggered_by_user` audit label is the explicit
-exception: only its short deterministic hash is logged. Keeping query text
+content). The `triggered_by_user` audit label is the explicit exception:
+only its short deterministic hash is logged. Keeping query text
 and log content out of the access log mirrors the redaction discipline above
 — the whole point of that redaction is to keep personal data inside Seq's own
 log content from leaving the process unmasked, so the access log must not
 become a side channel that reintroduces it.
 
-All Seq tools require a non-empty `triggered_by_user` value. The server trims
-the caller-supplied audit label and requires the resulting value to be
-1–256 characters, then hashes it before logging. It is not an authenticated
-identity claim; the authenticated Entra/service identity remains in `caller`.
-Clients using an unpinned server revision must add this field when upgrading.
+`triggered_by_user` is **required only when the connection authenticates as a
+shared service account** (`caller` is `service:<client-id>`), where every call
+would otherwise be attributed to the same client — a service call without it is
+refused with a message telling the caller to retry with the field set. For an
+interactive user the field is optional: their Entra `homeAccountId` already
+identifies them in `caller`, so requiring it added no audit value and instead
+failed the whole call with an opaque schema-validation error whenever a client
+omitted it. Where supplied, the server trims the label, requires 1–256
+characters, and hashes it before logging. It is not an authenticated identity
+claim; the authenticated Entra/service identity remains in `caller`.
 
 **Caller identity (`caller`):** on the remote (HTTP) server, an interactive
 user is identified by their Entra `homeAccountId` — a stable, per-user
