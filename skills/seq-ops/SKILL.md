@@ -25,6 +25,13 @@ exact same query against the test environment.
 | `seq-prod:get_events` | Query structured log events with filters, time ranges, and pagination |
 | `seq-prod:sql_query` | Run SQL-style aggregations (count, sum, mean, percentile, group by, time-slicing) — use instead of `seq-prod:get_events` for rollups |
 
+**Production is always scoped to the `No Debug` signal (`signal-6612`).** The hosted `seq-prod`
+connector adds it to every `get_events` and `sql_query` call server-side, so Debug, Trace and
+Verbose events cannot be read through it — and you cannot turn it off. Any `signal` you pass is
+intersected with it (`signal-662` goes to Seq as `signal-6612,signal-662`), so tenant scoping is
+unaffected. Treat a missing Debug-level event as out of scope, not as a failed query; `seq-test`
+has no such scope. Debug-level detail from prod has to be read in the Seq UI by a human.
+
 **Reach for `seq-prod:sql_query`, not `seq-prod:get_events`, whenever the answer is a number or a breakdown** — "how many errors", "which service is worst", "p95 latency over time". `seq-prod:get_events` returns raw rows you'd have to count by hand (and large result sets get truncated); `seq-prod:sql_query` computes the aggregate server-side.
 
 **But budget it.** An aggregate scans every event in the window, and on prod that is ~1 million events per hour — so `sql_query` is also the tool that times out. Read **[Query cost](#query-cost--how-not-to-time-out)** before your first query and set `range` explicitly on every call.

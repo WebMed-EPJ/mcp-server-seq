@@ -65,6 +65,27 @@ Requires Node.js >= 20 (see `engines` in package.json).
   Because `seq-server.ts` → `server.ts` never imports them, the esbuild stdio bundle stays free of
   them. The Docker image compiles `src/` with `tsc` (`build:server`) and ships prod `node_modules`
   (`npm ci --omit=dev`) — it is NOT esbuild-bundled.
+- **`src/mandatory-signal.ts`** — the **always-on signal scope**. Against production Seq
+  (`seq.intern.webmed.no`) every `get_events`/`sql_query` call is scoped to the **"No Debug"**
+  signal (`signal-6612`); `applyMandatorySignal` merges it with whatever `signal` the caller
+  passed, and Seq **intersects** comma-separated signal ids (verified on prod: a tenant signal
+  plus `signal-6612` returned that tenant's non-Debug events, not the union), so tenant scoping
+  still works and nothing can widen past the forced signal. Two properties are the point and must
+  not be "configured": there is **no env override** — no disable flag, no id override, only this
+  table — for the same reason `PRODUCTION_SEQ_HOSTS` is hard-coded (an env var is what gets copied
+  from one overlay into another); and it is keyed by **HOST, not by an "is production" boolean**,
+  because a signal id is a row in ONE instance's database — forcing prod's id onto the test
+  instance would make Seq reject every call rather than narrow it, so an unknown/unparseable
+  `SEQ_BASE_URL` gets NO forced signal (the opposite direction from the redaction fence, which
+  reads an unknown host as production; there the wrong guess leaks data, here it would only break
+  every query against an instance the id does not belong to). `server.ts` resolves it from the
+  module-level `SEQ_BASE_URL` — the same value the requests go to, never a second env read — and
+  appends `mandatorySignalNotice` to both tool descriptions, without which a model reads the
+  missing Debug events as a failed query and keeps widening the window.
+- **`src/seq-host.ts`** — `PRODUCTION_SEQ_HOSTS`, `canonicalHostname`, `hostFromUrl`, `seqHost`:
+  one answer to "which Seq instance is this", shared by the redaction fence (`redact.ts`) and the
+  mandatory signal. The two normalisations (port dropped, one trailing dot stripped) are
+  load-bearing and documented there.
 - **`src/truncate.ts`** — pure response-trimming + query-cost helpers (`truncateEventList`,
   `truncateQueryResult`, `budgetWarning`, `CHARACTER_LIMIT`), imported by `server.ts` and unit-tested
   without booting a transport. Two non-obvious things live here. (1) A `group by time(...)` query

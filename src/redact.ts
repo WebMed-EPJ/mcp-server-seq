@@ -1,6 +1,7 @@
 import { OpenRedaction, type PIIPattern } from 'openredaction';
 
 import { createGuidAliases, type GuidAliases, stripGuids } from './guids.js';
+import { canonicalHostname, PRODUCTION_SEQ_HOSTS, seqHost } from './seq-host.js';
 
 /**
  * Local, privacy-preserving redaction of personal data in log payloads
@@ -33,51 +34,20 @@ import { createGuidAliases, type GuidAliases, stripGuids } from './guids.js';
  */
 
 /**
- * Seq hosts where redaction may NEVER be switched off, whatever the environment
- * says. Hard-coded on purpose: the opt-out below is an env var, and an env var
- * is exactly what gets copied from one overlay into another. This list is the
- * one thing a copied `SEQ_REDACTION_ENABLED=false` cannot take with it.
- */
-const PRODUCTION_SEQ_HOSTS = ['seq.intern.webmed.no'];
-
-/**
  * Seq hosts known to hold no real personal data, where the opt-out is honoured.
  * An ALLOW-list rather than a deny-list: an unknown host — a new instance, a
  * typo, an unset SEQ_BASE_URL — must read as production, because the failure
  * mode of guessing wrong is patient data reaching a model unredacted. Extendable
  * for a local instance via SEQ_NON_PRODUCTION_HOSTS (comma-separated), which can
  * only ADD hosts and never overrides PRODUCTION_SEQ_HOSTS.
+ *
+ * The production list it can never override, and the hostname normalisation
+ * both sides go through, live in `seq-host.ts` — shared with the mandatory
+ * signal scope so there is one answer to "is this production".
  */
 const NON_PRODUCTION_SEQ_HOSTS = ['seq.k8s.webmedepj.no', 'localhost', '127.0.0.1', '[::1]'];
 // NB. these are HOSTNAMES, never host:port — canonicalHostname drops the port,
 // so a local Seq on :5341 matches the bare 'localhost' entry.
-
-/**
- * One spelling per host, so the comparisons below cannot be side-stepped.
- *
- * Two normalisations, both load-bearing. The PORT is dropped (`URL.host` keeps
- * it, so the documented local target `http://localhost:5341` did not match the
- * allow-listed `localhost` — the opt-out was refused where it is meant to work).
- * And ONE trailing dot is removed: `seq.intern.webmed.no.` is the same host as
- * `seq.intern.webmed.no` to DNS, but not to a string compare — so without this
- * the production entry could be side-stepped by spelling it with the dot and
- * adding that spelling to SEQ_NON_PRODUCTION_HOSTS.
- */
-function canonicalHostname(host: string): string {
-  return host.trim().toLowerCase().replace(/\.$/, '');
-}
-
-/** The host of the configured upstream Seq, or null when it cannot be read. */
-function seqHost(): string | null {
-  const raw = process.env.SEQ_BASE_URL?.trim();
-  if (!raw) return null;
-  try {
-    return canonicalHostname(new URL(raw).hostname);
-  } catch {
-    // An unparseable URL is not a host we can clear — treat it as unknown.
-    return null;
-  }
-}
 
 /**
  * May the redaction opt-out be honoured against the configured Seq instance?
