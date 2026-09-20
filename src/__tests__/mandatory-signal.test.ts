@@ -4,6 +4,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { silentLogger } from '../logger.js';
 import {
   applyMandatorySignal,
+  mandatorySignalCoverageGap,
   mandatorySignalForHost,
   mandatorySignalForUrl,
   mandatorySignalNotice,
@@ -43,6 +44,14 @@ describe('mandatorySignalForUrl', () => {
     expect(mandatorySignalForUrl('not a url')).toBeNull();
     expect(mandatorySignalForUrl(undefined)).toBeNull();
     expect(mandatorySignalForHost(null)).toBeNull();
+  });
+
+  it('scopes every host the redaction fence calls production', () => {
+    // The two host-keyed controls must not drift: a host added to
+    // PRODUCTION_SEQ_HOSTS but not here would be redacted and still serve Debug
+    // events. The tables stay separate because a signal id belongs to one
+    // instance, so this is the invariant that ties them together.
+    expect(mandatorySignalCoverageGap()).toEqual([]);
   });
 
   it('cannot be switched off or redirected by the environment', () => {

@@ -1,4 +1,4 @@
-import { hostFromUrl } from './seq-host.js';
+import { hostFromUrl, PRODUCTION_SEQ_HOSTS } from './seq-host.js';
 
 /**
  * Signal scope that is forced onto every event and query call, per Seq host.
@@ -25,6 +25,15 @@ import { hostFromUrl } from './seq-host.js';
  *
  * Production is the only entry by design — the test instance is read with
  * Debug events intact.
+ *
+ * The keys are NOT derived from `PRODUCTION_SEQ_HOSTS`, for the same
+ * per-instance reason: a second production instance would carry a signal id of
+ * its own, and deriving the map would silently give it this one. What the two
+ * lists must not do is DRIFT — a host added to `PRODUCTION_SEQ_HOSTS` and
+ * forgotten here would be redacted but read with Debug events — so
+ * `mandatorySignalCoverageGap()` states the invariant and a unit test fails on
+ * it. An alias for an instance already listed takes the same id as the host it
+ * aliases; a genuinely new instance needs its own signal looked up in Seq.
  */
 export interface MandatorySignal {
   /** The Seq signal id, as issued by the instance in question. */
@@ -113,4 +122,19 @@ export function mandatorySignalNotice(mandatory: MandatorySignal): string {
     `be switched off; a 'signal' you pass is intersected with it (AND), not used ` +
     `instead of it. Do not treat missing Debug-level events as a failed query.`
   );
+}
+
+/**
+ * Production hosts that have no mandatory signal.
+ *
+ * The invariant behind the two host-keyed controls in this server: every host
+ * `redact.ts` treats as production must also be scoped here, or a host would be
+ * redacted while still serving Debug events. Enforced by a unit test rather
+ * than at startup — it can only be broken by editing one of the two tables, so
+ * the failure belongs in CI, not in a running pod.
+ *
+ * @returns the production hosts missing an entry; empty when the two agree
+ */
+export function mandatorySignalCoverageGap(): string[] {
+  return PRODUCTION_SEQ_HOSTS.filter((host) => !MANDATORY_SIGNALS.has(host));
 }
