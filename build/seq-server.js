@@ -36695,6 +36695,10 @@ function callerId(authInfo) {
   }
   return authInfo ? "unknown" : "stdio";
 }
+function isServiceCaller(caller) {
+  return caller.startsWith("service:");
+}
+var MISSING_AUDIT_LABEL_MESSAGE = "This connection authenticates as a shared service account, so every tool call must carry 'triggered_by_user': the name or id of the person the call is made on behalf of. Retry the same call with that field set.";
 function triggeredByUser(args) {
   if (!args || typeof args !== "object" || Array.isArray(args)) {
     return void 0;
@@ -36705,12 +36709,25 @@ function triggeredByUser(args) {
   }
   return createHash("sha256").update(value.trim()).digest("hex").slice(0, 16);
 }
-function withAccessLog(logger2, name, handler) {
+function withAccessLog(logger2, name, handler, options = {}) {
   const wrapped = async (...args) => {
     const extra = args[args.length - 1];
     const caller = callerId(extra?.authInfo);
     const humanCaller = triggeredByUser(args[0]);
     const startedAt = Date.now();
+    if (options.requireAuditLabel && !humanCaller && isServiceCaller(caller)) {
+      logger2.error("tool call", {
+        tool: name,
+        caller,
+        status: "error",
+        ms: 0,
+        errorName: "MissingAuditLabel"
+      });
+      return {
+        content: [{ type: "text", text: MISSING_AUDIT_LABEL_MESSAGE }],
+        isError: true
+      };
+    }
     try {
       const result = await handler(...args);
       const isError = Boolean(result && typeof result === "object" && result.isError);
@@ -36909,7 +36926,7 @@ async function makeSeqRequest(endpoint, params = {}) {
   return response.json();
 }
 var timeRangeSchema = external_exports.enum(["1m", "15m", "30m", "1h", "2h", "6h", "12h", "1d", "7d", "14d", "30d"]);
-var triggeredByUserSchema = external_exports.string().trim().min(1).max(256).describe("Caller-supplied audit label for this call; not independently verified; required on every tool call and never sent to Seq");
+var triggeredByUserSchema = external_exports.string().trim().min(1).max(256).optional().describe("Who this call is made on behalf of: an audit label, not independently verified, never sent to Seq. Required when the connection authenticates as a shared service account; otherwise optional.");
 var signalsSchema = external_exports.object({
   triggered_by_user: triggeredByUserSchema,
   ownerId: external_exports.string().optional().describe("Filter signals by owner ID"),
@@ -36937,11 +36954,18 @@ var dataSchema = external_exports.object({
   toDateUtc: external_exports.string().datetime({ offset: true }).optional().describe('End of time range in UTC ISO 8601, e.g. "2024-01-15T11:00:00Z"'),
   range: timeRangeSchema.optional().describe("Relative time range; takes precedence over fromDateUtc/toDateUtc. ONLY these values are accepted \u2014 1m, 15m, 30m, 1h, 2h, 6h, 12h, 1d, 7d, 14d, 30d \u2014 anything else (4h, 8h, 3d) is rejected before the query runs; use fromDateUtc/toDateUtc for an arbitrary window. ALWAYS set this explicitly: the 1d fallback is the most expensive window there is and is the single most common cause of a timeout")
 }).strict();
+var READ_ONLY_TOOL = {
+  /** Changes nothing in Seq. */
+  readOnlyHint: true,
+  /** Talks to a Seq instance, i.e. an open external system. */
+  openWorldHint: true
+};
 function createSeqServer(logger2 = loggerFromEnv()) {
   const server2 = new McpServer({
     name: "seq-mcp-server",
     version: "1.0.0"
   });
+  const withToolLog = (name, handler) => withAccessLog(logger2, name, handler, { requireAuditLabel: true });
   server2.resource(
     "signals",
     "seq://signals",
@@ -36971,11 +36995,15 @@ function createSeqServer(logger2 = loggerFromEnv()) {
       }
     })
   );
-  server2.tool(
+  server2.registerTool(
     "get_signals",
-    "List saved Seq signals (named filters). Use signal IDs with get_events to narrow results to a specific service or category.",
-    signalsSchema.shape,
-    withAccessLog(logger2, "get_signals", async ({ ownerId, shared, partial: partial2 }) => {
+    {
+      title: "List Seq signals",
+      description: "List saved Seq signals (named filters). Use signal IDs with get_events to narrow results to a specific service or category.",
+      annotations: READ_ONLY_TOOL,
+      inputSchema: signalsSchema.shape
+    },
+    withToolLog("get_signals", async ({ ownerId, shared, partial: partial2 }) => {
       try {
         const params = {
           shared: shared?.toString() ?? "true"
@@ -37010,9 +37038,11 @@ function createSeqServer(logger2 = loggerFromEnv()) {
       }
     })
   );
-  server2.tool(
+  server2.registerTool(
     "get_events",
-    `Retrieve raw structured log events from Seq \u2014 the newest matches first. Use it to SEE example events (messages, stack traces, properties); use sql_query when the answer is a count or a breakdown.
+    {
+      title: "Get Seq events",
+      description: `Retrieve raw structured log events from Seq \u2014 the newest matches first. Use it to SEE example events (messages, stack traces, properties); use sql_query when the answer is a count or a breakdown.
 
 Cost: this scans newest-first and STOPS once it has 'count' matches, so a wide range is cheap when matches are common and expensive when they are rare (a filter matching nothing scans the whole window).
 
@@ -37023,8 +37053,10 @@ Tips:
 - Call get_signals first to find signal IDs, and combine signal + filter for precise results
 - Use render=true for human-readable messages instead of raw message templates
 - Use 'after' with the last event ID to page through large result sets`,
-    eventsSchema.shape,
-    withAccessLog(logger2, "get_events", async ({ signal, filter, count, fromDateUtc, toDateUtc, range, after, render }) => {
+      annotations: READ_ONLY_TOOL,
+      inputSchema: eventsSchema.shape
+    },
+    withToolLog("get_events", async ({ signal, filter, count, fromDateUtc, toDateUtc, range, after, render }) => {
       try {
         const params = {};
         if (range) {
@@ -37061,11 +37093,15 @@ Tips:
       }
     })
   );
-  server2.tool(
+  server2.registerTool(
     "get_alert_state",
-    "Get the current state of all Seq alerts. Returns firing, ok, or suppressed status for each configured alert.",
-    { triggered_by_user: triggeredByUserSchema },
-    withAccessLog(logger2, "get_alert_state", async () => {
+    {
+      title: "Get Seq alert state",
+      description: "Get the current state of all Seq alerts. Returns firing, ok, or suppressed status for each configured alert.",
+      annotations: READ_ONLY_TOOL,
+      inputSchema: { triggered_by_user: triggeredByUserSchema }
+    },
+    withToolLog("get_alert_state", async () => {
       try {
         const alertState = await makeSeqRequest("/api/alertstate");
         const safeAlertState = await redactDeep(alertState);
@@ -37087,9 +37123,11 @@ Tips:
       }
     })
   );
-  server2.tool(
+  server2.registerTool(
     "sql_query",
-    `Run a Seq SQL-style query for aggregations and tabular analysis (https://datalust.co/docs/sql-queries).
+    {
+      title: "Run a Seq SQL query",
+      description: `Run a Seq SQL-style query for aggregations and tabular analysis (https://datalust.co/docs/sql-queries).
 
 Use this \u2014 not get_events \u2014 when you need counts, sums, means, percentiles, distinct values, group-by breakdowns, or time-series. get_events returns raw rows; sql_query computes the aggregate server-side.
 
@@ -37109,8 +37147,10 @@ COST \u2014 this is what makes queries time out. An aggregate scans every event 
 Tips:
 - Call get_signals first to scope the query to a service/category via the 'signal' parameter
 - Add a 'limit' clause to large rowsets, or group at a coarser level, if results are truncated`,
-    dataSchema.shape,
-    withAccessLog(logger2, "sql_query", async ({ query, signal, fromDateUtc, toDateUtc, range }) => {
+      annotations: READ_ONLY_TOOL,
+      inputSchema: dataSchema.shape
+    },
+    withToolLog("sql_query", async ({ query, signal, fromDateUtc, toDateUtc, range }) => {
       try {
         const { rangeStartUtc, rangeEndUtc } = resolveDataRange(
           { range, fromDateUtc, toDateUtc },

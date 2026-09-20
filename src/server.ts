@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { withAccessLog } from "./access-log.js";
+import { withAccessLog, type AnyHandler } from "./access-log.js";
 import { loggerFromEnv, type Logger } from "./logger.js";
 import { redactDeep, redactText } from "./redact.js";
 import { resolveDataRange } from "./timerange.js";
@@ -130,8 +130,13 @@ async function makeSeqRequest<T>(endpoint: string, params: Record<string, string
 
 // Schema for time range validation
 const timeRangeSchema = z.enum(['1m', '15m', '30m', '1h', '2h', '6h', '12h', '1d', '7d', '14d', '30d']);
-const triggeredByUserSchema = z.string().trim().min(1).max(256)
-  .describe('Caller-supplied audit label for this call; not independently verified; required on every tool call and never sent to Seq');
+// Optional in the SCHEMA, enforced in `withAccessLog` for shared service
+// accounts only (see AccessLogOptions.requireAuditLabel). An interactive user
+// is already identified by their Entra homeAccountId, so a hard schema
+// requirement bought no audit value there and cost every client that omitted
+// the field an opaque "Invalid arguments" validation error instead of a result.
+const triggeredByUserSchema = z.string().trim().min(1).max(256).optional()
+  .describe('Who this call is made on behalf of: an audit label, not independently verified, never sent to Seq. Required when the connection authenticates as a shared service account; otherwise optional.');
 
 const signalsSchema = z.object({
   triggered_by_user: triggeredByUserSchema,
@@ -190,6 +195,21 @@ const dataSchema = z.object({
 }).strict();
 
 /**
+ * MCP tool annotations. Every tool here READS Seq and changes nothing, so the
+ * set is uniform. They are hints, not enforcement — the point is that a
+ * connector UI (claude.ai → Settings → Connectors) groups and gates tools by
+ * `readOnlyHint`; with no annotations at all every tool lands in one "Other
+ * tools" bucket. A client must re-read `tools/list` (reconnect the connector)
+ * after a redeploy before the grouping shows up.
+ */
+const READ_ONLY_TOOL = {
+  /** Changes nothing in Seq. */
+  readOnlyHint: true,
+  /** Talks to a Seq instance, i.e. an open external system. */
+  openWorldHint: true,
+} as const;
+
+/**
  * Build a fully-configured Seq MCP server with all resources and tools
  * registered. Both the stdio entry point and the remote HTTP entry point call
  * this so the two transports expose an identical tool surface. The remote server
@@ -209,6 +229,13 @@ export function createSeqServer(logger: Logger = loggerFromEnv()): McpServer {
     name: "seq-mcp-server",
     version: "1.0.0"
   });
+
+  // Every TOOL is audited and, for a shared service account, must name the
+  // person it acts for. The `signals` resource below takes no arguments at
+  // all, so a service caller has no way to supply a label there and is logged
+  // without one.
+  const withToolLog = <T extends AnyHandler>(name: string, handler: T): T =>
+    withAccessLog(logger, name, handler, { requireAuditLabel: true });
 
   // Resource for listing signals
   server.resource(
@@ -244,11 +271,16 @@ export function createSeqServer(logger: Logger = loggerFromEnv()): McpServer {
   );
 
   // Tool: List signals
-  server.tool(
+  server.registerTool(
     "get_signals",
-    "List saved Seq signals (named filters). Use signal IDs with get_events to narrow results to a specific service or category.",
-    signalsSchema.shape,
-    withAccessLog(logger, "get_signals", async ({ ownerId, shared, partial }) => {
+    {
+      title: "List Seq signals",
+      description:
+        "List saved Seq signals (named filters). Use signal IDs with get_events to narrow results to a specific service or category.",
+      annotations: READ_ONLY_TOOL,
+      inputSchema: signalsSchema.shape,
+    },
+    withToolLog("get_signals", async ({ ownerId, shared, partial }) => {
       try {
         const params: Record<string, string> = {
           shared: shared?.toString() ?? "true"
@@ -288,9 +320,11 @@ export function createSeqServer(logger: Logger = loggerFromEnv()): McpServer {
   );
 
   // Tool: Get events
-  server.tool(
+  server.registerTool(
     "get_events",
-    `Retrieve raw structured log events from Seq — the newest matches first. Use it to SEE example events (messages, stack traces, properties); use sql_query when the answer is a count or a breakdown.
+    {
+      title: "Get Seq events",
+      description: `Retrieve raw structured log events from Seq — the newest matches first. Use it to SEE example events (messages, stack traces, properties); use sql_query when the answer is a count or a breakdown.
 
 Cost: this scans newest-first and STOPS once it has 'count' matches, so a wide range is cheap when matches are common and expensive when they are rare (a filter matching nothing scans the whole window).
 
@@ -301,8 +335,10 @@ Tips:
 - Call get_signals first to find signal IDs, and combine signal + filter for precise results
 - Use render=true for human-readable messages instead of raw message templates
 - Use 'after' with the last event ID to page through large result sets`,
-    eventsSchema.shape,
-    withAccessLog(logger, "get_events", async ({ signal, filter, count, fromDateUtc, toDateUtc, range, after, render }) => {
+      annotations: READ_ONLY_TOOL,
+      inputSchema: eventsSchema.shape,
+    },
+    withToolLog("get_events", async ({ signal, filter, count, fromDateUtc, toDateUtc, range, after, render }) => {
       try {
         const params: Record<string, string> = {};
 
@@ -356,11 +392,16 @@ Tips:
   );
 
   // Tool: Get alert state
-  server.tool(
+  server.registerTool(
     "get_alert_state",
-    "Get the current state of all Seq alerts. Returns firing, ok, or suppressed status for each configured alert.",
-    { triggered_by_user: triggeredByUserSchema },
-    withAccessLog(logger, "get_alert_state", async () => {
+    {
+      title: "Get Seq alert state",
+      description:
+        "Get the current state of all Seq alerts. Returns firing, ok, or suppressed status for each configured alert.",
+      annotations: READ_ONLY_TOOL,
+      inputSchema: { triggered_by_user: triggeredByUserSchema },
+    },
+    withToolLog("get_alert_state", async () => {
       try {
         const alertState = await makeSeqRequest<Record<string, unknown>>('/api/alertstate');
         const safeAlertState = await redactDeep(alertState);
@@ -385,9 +426,11 @@ Tips:
   );
 
   // Tool: Run a SQL-style query (aggregations)
-  server.tool(
+  server.registerTool(
     "sql_query",
-    `Run a Seq SQL-style query for aggregations and tabular analysis (https://datalust.co/docs/sql-queries).
+    {
+      title: "Run a Seq SQL query",
+      description: `Run a Seq SQL-style query for aggregations and tabular analysis (https://datalust.co/docs/sql-queries).
 
 Use this — not get_events — when you need counts, sums, means, percentiles, distinct values, group-by breakdowns, or time-series. get_events returns raw rows; sql_query computes the aggregate server-side.
 
@@ -407,8 +450,10 @@ COST — this is what makes queries time out. An aggregate scans every event in 
 Tips:
 - Call get_signals first to scope the query to a service/category via the 'signal' parameter
 - Add a 'limit' clause to large rowsets, or group at a coarser level, if results are truncated`,
-    dataSchema.shape,
-    withAccessLog(logger, "sql_query", async ({ query, signal, fromDateUtc, toDateUtc, range }) => {
+      annotations: READ_ONLY_TOOL,
+      inputSchema: dataSchema.shape,
+    },
+    withToolLog("sql_query", async ({ query, signal, fromDateUtc, toDateUtc, range }) => {
       try {
         const { rangeStartUtc, rangeEndUtc } = resolveDataRange(
           { range, fromDateUtc, toDateUtc },
