@@ -34,6 +34,28 @@ MCP Server for Seq's API endpoints for interacting with your logging and monitor
 #### Alert Management
 - `get_alert_state` - Retrieve the current state of alerts
 
+#### Always-on signal scope (production)
+
+Against WebMed **production** Seq (`seq.intern.webmed.no`), every `get_events`
+and `sql_query` call is scoped to the **"No Debug"** signal (`signal-6612`), so
+Debug, Trace and Verbose events are not reachable through the connector. It is
+what a human clicks in the Seq UI before reading anything, and prod ingests
+roughly a million events an hour, most of it that noise.
+
+The scope is **hard-coded in `src/mandatory-signal.ts` and cannot be removed**:
+there is no environment variable that switches it off or points it at another
+signal, and a `signal` argument a caller passes is *intersected* with it (Seq
+ANDs comma-separated signal ids) rather than replacing it. Tenant scoping
+therefore keeps working unchanged — `signal: "signal-662"` is sent as
+`signal-6612,signal-662`.
+
+It is keyed by **host**, not by an "is production" flag, because a Seq signal id
+only exists on the instance that issued it: forcing production's id onto another
+instance would make Seq reject every call rather than narrow it. So the test
+instance, a local Seq and any unrecognised `SEQ_BASE_URL` get no forced signal.
+Both tools say so in their description, so a model does not read the missing
+Debug events as a failed query.
+
 #### Tool annotations
 Every tool reads Seq and changes nothing, so all four are published with
 `readOnlyHint: true` (and `openWorldHint: true`, since Seq is an external

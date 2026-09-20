@@ -2,6 +2,11 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { withAccessLog, type AnyHandler } from "./access-log.js";
 import { loggerFromEnv, type Logger } from "./logger.js";
+import {
+  applyMandatorySignal,
+  mandatorySignalForUrl,
+  mandatorySignalNotice,
+} from "./mandatory-signal.js";
 import { redactDeep, redactText } from "./redact.js";
 import { resolveDataRange } from "./timerange.js";
 import {
@@ -230,6 +235,15 @@ export function createSeqServer(logger: Logger = loggerFromEnv()): McpServer {
     version: "1.0.0"
   });
 
+  // The signal scope forced onto every event/query call against this upstream
+  // (see mandatory-signal.ts). Derived from the SAME SEQ_BASE_URL the requests
+  // go to rather than a separate environment read, so the scope can never
+  // describe a different instance from the one being queried.
+  const mandatorySignal = mandatorySignalForUrl(SEQ_BASE_URL);
+  const mandatorySignalSuffix = mandatorySignal
+    ? `\n\n${mandatorySignalNotice(mandatorySignal)}`
+    : "";
+
   // Every TOOL is audited and, for a shared service account, must name the
   // person it acts for. The `signals` resource below takes no arguments at
   // all, so a service caller has no way to supply a label there and is logged
@@ -334,7 +348,7 @@ Tips:
 - Filter expressions use Seq query syntax: @Level in ['Error','Fatal'], StatusCode >= 500, RequestPath like '/api/%', @Exception like '%TimeoutException%'
 - Call get_signals first to find signal IDs, and combine signal + filter for precise results
 - Use render=true for human-readable messages instead of raw message templates
-- Use 'after' with the last event ID to page through large result sets`,
+- Use 'after' with the last event ID to page through large result sets` + mandatorySignalSuffix,
       annotations: READ_ONLY_TOOL,
       inputSchema: eventsSchema.shape,
     },
@@ -351,7 +365,8 @@ Tips:
           params.range = '1h';
         }
 
-        if (signal) params.signal = signal;
+        const scopedSignal = applyMandatorySignal(signal, mandatorySignal);
+        if (scopedSignal) params.signal = scopedSignal;
         if (filter) params.filter = filter;
         if (count) params.count = count.toString();
         if (after) params.after = after;
@@ -449,7 +464,7 @@ COST — this is what makes queries time out. An aggregate scans every event in 
 
 Tips:
 - Call get_signals first to scope the query to a service/category via the 'signal' parameter
-- Add a 'limit' clause to large rowsets, or group at a coarser level, if results are truncated`,
+- Add a 'limit' clause to large rowsets, or group at a coarser level, if results are truncated` + mandatorySignalSuffix,
       annotations: READ_ONLY_TOOL,
       inputSchema: dataSchema.shape,
     },
@@ -465,7 +480,8 @@ Tips:
           rangeStartUtc,
           rangeEndUtc
         };
-        if (signal) params.signal = signal;
+        const scopedSignal = applyMandatorySignal(signal, mandatorySignal);
+        if (scopedSignal) params.signal = scopedSignal;
 
         const startedAt = Date.now();
         const data = await makeSeqRequest<SeqQueryResult>('/api/data', params);

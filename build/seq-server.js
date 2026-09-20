@@ -28222,21 +28222,26 @@ function stripGuids(text, aliases, opts) {
   return opts?.compact === false ? hyphenated : hyphenated.replace(GUID_COMPACT, replace);
 }
 
-// src/redact.ts
+// src/seq-host.ts
 var PRODUCTION_SEQ_HOSTS = ["seq.intern.webmed.no"];
-var NON_PRODUCTION_SEQ_HOSTS = ["seq.k8s.webmedepj.no", "localhost", "127.0.0.1", "[::1]"];
 function canonicalHostname(host) {
   return host.trim().toLowerCase().replace(/\.$/, "");
 }
-function seqHost() {
-  const raw = process.env.SEQ_BASE_URL?.trim();
-  if (!raw) return null;
+function hostFromUrl(raw) {
+  const trimmed = raw?.trim();
+  if (!trimmed) return null;
   try {
-    return canonicalHostname(new URL(raw).hostname);
+    return canonicalHostname(new URL(trimmed).hostname);
   } catch {
     return null;
   }
 }
+function seqHost() {
+  return hostFromUrl(process.env.SEQ_BASE_URL);
+}
+
+// src/redact.ts
+var NON_PRODUCTION_SEQ_HOSTS = ["seq.k8s.webmedepj.no", "localhost", "127.0.0.1", "[::1]"];
 function redactionOptOutAllowed() {
   const host = seqHost();
   if (host === null || PRODUCTION_SEQ_HOSTS.includes(host)) {
@@ -36760,6 +36765,32 @@ function withAccessLog(logger2, name, handler, options = {}) {
   return wrapped;
 }
 
+// src/mandatory-signal.ts
+var MANDATORY_SIGNALS = /* @__PURE__ */ new Map([
+  [
+    "seq.intern.webmed.no",
+    {
+      id: "signal-6612",
+      title: "No Debug",
+      effect: "Debug, Trace and Verbose events are excluded"
+    }
+  ]
+]);
+function mandatorySignalForHost(host) {
+  return (host !== null ? MANDATORY_SIGNALS.get(host) : void 0) ?? null;
+}
+function mandatorySignalForUrl(url) {
+  return mandatorySignalForHost(hostFromUrl(url));
+}
+function applyMandatorySignal(requested, mandatory) {
+  if (!mandatory) return requested;
+  const callerIds = (requested ?? "").split(",").map((id) => id.trim()).filter((id) => id !== "" && id.toLowerCase() !== mandatory.id.toLowerCase());
+  return [mandatory.id, ...callerIds].join(",");
+}
+function mandatorySignalNotice(mandatory) {
+  return `ALWAYS-ON SCOPE: every call is scoped to the "${mandatory.title}" signal (${mandatory.id}) on this Seq instance, so ${mandatory.effect} and cannot be retrieved through this connector. The scope is applied server-side and cannot be switched off; a 'signal' you pass is intersected with it (AND), not used instead of it. Do not treat missing Debug-level events as a failed query.`;
+}
+
 // src/timerange.ts
 var RANGE_MS = {
   "1m": 6e4,
@@ -36965,6 +36996,10 @@ function createSeqServer(logger2 = loggerFromEnv()) {
     name: "seq-mcp-server",
     version: "1.0.0"
   });
+  const mandatorySignal = mandatorySignalForUrl(SEQ_BASE_URL);
+  const mandatorySignalSuffix = mandatorySignal ? `
+
+${mandatorySignalNotice(mandatorySignal)}` : "";
   const withToolLog = (name, handler) => withAccessLog(logger2, name, handler, { requireAuditLabel: true });
   server2.resource(
     "signals",
@@ -37052,7 +37087,7 @@ Tips:
 - Filter expressions use Seq query syntax: @Level in ['Error','Fatal'], StatusCode >= 500, RequestPath like '/api/%', @Exception like '%TimeoutException%'
 - Call get_signals first to find signal IDs, and combine signal + filter for precise results
 - Use render=true for human-readable messages instead of raw message templates
-- Use 'after' with the last event ID to page through large result sets`,
+- Use 'after' with the last event ID to page through large result sets` + mandatorySignalSuffix,
       annotations: READ_ONLY_TOOL,
       inputSchema: eventsSchema.shape
     },
@@ -37067,7 +37102,8 @@ Tips:
         } else {
           params.range = "1h";
         }
-        if (signal) params.signal = signal;
+        const scopedSignal = applyMandatorySignal(signal, mandatorySignal);
+        if (scopedSignal) params.signal = scopedSignal;
         if (filter) params.filter = filter;
         if (count) params.count = count.toString();
         if (after) params.after = after;
@@ -37146,7 +37182,7 @@ COST \u2014 this is what makes queries time out. An aggregate scans every event 
 
 Tips:
 - Call get_signals first to scope the query to a service/category via the 'signal' parameter
-- Add a 'limit' clause to large rowsets, or group at a coarser level, if results are truncated`,
+- Add a 'limit' clause to large rowsets, or group at a coarser level, if results are truncated` + mandatorySignalSuffix,
       annotations: READ_ONLY_TOOL,
       inputSchema: dataSchema.shape
     },
@@ -37161,7 +37197,8 @@ Tips:
           rangeStartUtc,
           rangeEndUtc
         };
-        if (signal) params.signal = signal;
+        const scopedSignal = applyMandatorySignal(signal, mandatorySignal);
+        if (scopedSignal) params.signal = scopedSignal;
         const startedAt = Date.now();
         const data = await makeSeqRequest("/api/data", params);
         const durationMs = Date.now() - startedAt;
