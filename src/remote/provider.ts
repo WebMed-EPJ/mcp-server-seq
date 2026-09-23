@@ -61,6 +61,13 @@ export interface RemoteOptions {
    * omit to allow only interactive-user sessions. See remote/service-auth.ts.
    */
   serviceVerifier?: ServiceTokenVerifier;
+  /**
+   * Optional GitHub Actions OIDC token verifier (keyless automation, e.g. gh-aw).
+   * Tried first in verifyAccessToken and self-gates on the GitHub issuer, so it
+   * returns null for any non-GitHub token and never affects the Entra/user paths.
+   * Omit to allow only Entra callers. See remote/github-oidc.ts.
+   */
+  githubVerifier?: ServiceTokenVerifier;
 }
 
 /**
@@ -90,6 +97,7 @@ export class EntraOAuthProvider implements OAuthServerProvider {
   private readonly scopes: string[];
   private readonly logger: Logger;
   private readonly serviceVerifier?: ServiceTokenVerifier;
+  private readonly githubVerifier?: ServiceTokenVerifier;
 
   constructor(private readonly opts: RemoteOptions) {
     const { entra } = opts;
@@ -107,6 +115,7 @@ export class EntraOAuthProvider implements OAuthServerProvider {
     this.scopes = entra.scopes;
     this.logger = opts.logger ?? silentLogger;
     this.serviceVerifier = opts.serviceVerifier;
+    this.githubVerifier = opts.githubVerifier;
   }
 
   get clientsStore(): OAuthStore {
@@ -264,7 +273,15 @@ export class EntraOAuthProvider implements OAuthServerProvider {
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
-    // Machine-to-machine path first: a valid Entra app-only (client-credentials)
+    // Dual-issuer routing. GitHub Actions OIDC path first: a valid, allow-listed
+    // GitHub token authenticates a keyless automation caller (e.g. gh-aw). The
+    // verifier self-gates on the GitHub issuer and returns null for any other
+    // token (Entra JWT or our opaque user token), so those fall through cleanly.
+    if (this.githubVerifier) {
+      const github = await this.githubVerifier(token);
+      if (github) return github;
+    }
+    // Machine-to-machine path: a valid Entra app-only (client-credentials)
     // token authenticates a headless service caller (e.g. Claude-in-Slack). The
     // verifier returns null for our own opaque user tokens, which fall through.
     if (this.serviceVerifier) {
